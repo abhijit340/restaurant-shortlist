@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Nearby Eats</title>
+  <meta name="theme-color" content="#1f6f5c">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <style>
+    :root {
+      --bg: #f6f4ef; --card: #ffffff; --text: #1d1d1b; --muted: #6b6b66;
+      --accent: #1f6f5c; --accent-text: #ffffff; --error: #b3261e; --border: #e2dfd7;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #151714; --card: #1f221e; --text: #ecebe6; --muted: #a3a39c;
+        --accent: #4fb89c; --accent-text: #0e1a16; --error: #f2b8b5; --border: #33372f;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: var(--bg); color: var(--text);
+      font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      padding: max(16px, env(safe-area-inset-top)) 16px 32px;
+    }
+    main { max-width: 480px; margin: 0 auto; }
+    h1 { font-size: 1.5rem; margin: 8px 0 4px; }
+    .sub { color: var(--muted); margin: 0 0 20px; }
+    button {
+      width: 100%; padding: 16px; font-size: 1.05rem; font-weight: 600;
+      border: 0; border-radius: 12px; background: var(--accent); color: var(--accent-text);
+    }
+    button:disabled { opacity: .6; }
+    .card {
+      background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+      padding: 16px; margin-top: 16px;
+    }
+    .row { display: flex; justify-content: space-between; padding: 6px 0; gap: 12px; }
+    .row span:first-child { color: var(--muted); }
+    .row span:last-child { font-variant-numeric: tabular-nums; text-align: right; }
+    .error { color: var(--error); }
+    a { color: var(--accent); }
+    footer { color: var(--muted); font-size: .8rem; margin-top: 24px; text-align: center; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Nearby Eats</h1>
+  <p class="sub">Step 1: location check</p>
+
+  <button id="locate">Find my location</button>
+
+  <div class="card" id="result" hidden>
+    <div class="row"><span>Latitude</span><span id="lat"></span></div>
+    <div class="row"><span>Longitude</span><span id="lng"></span></div>
+    <div class="row"><span>Accuracy</span><span id="acc"></span></div>
+    <div class="row"><span>Taken at</span><span id="time"></span></div>
+    <p><a id="maplink" target="_blank" rel="noopener">Check this spot in Google Maps</a></p>
+  </div>
+
+  <div class="card error" id="error" hidden></div>
+
+  <footer>v0.1</footer>
+</main>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+
+  // Plain-English versions of the browser's geolocation error codes.
+  const ERRORS = {
+    1: "Location permission was denied. In Chrome: tap the icon left of the address bar → Permissions → Location → Allow, then try again.",
+    2: "Your phone couldn't work out a location. Check that Location is turned on in Android's quick settings.",
+    3: "Timed out waiting for a location. Try again, ideally near a window or outdoors.",
+  };
+
+  $("locate").addEventListener("click", () => {
+    if (!("geolocation" in navigator)) {
+      showError("This browser doesn't support location.");
+      return;
+    }
+    $("locate").disabled = true;
+    $("locate").textContent = "Locating…";
+    $("error").hidden = true;
+
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const { latitude, longitude, accuracy } = pos.coords;
+        $("lat").textContent = latitude.toFixed(5);
+        $("lng").textContent = longitude.toFixed(5);
+        $("acc").textContent = `± ${Math.round(accuracy)} m`;
+        $("time").textContent = new Date(pos.timestamp).toLocaleTimeString();
+        $("maplink").href = `https://www.google.com/maps/search/?api=1&query=${latitude},${longitude}`;
+        $("result").hidden = false;
+        resetButton();
+      },
+      (err) => {
+        showError(ERRORS[err.code] || err.message);
+        resetButton();
+      },
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+    );
+  });
+
+  function showError(msg) {
+    $("error").textContent = msg;
+    $("error").hidden = false;
+  }
+
+  function resetButton() {
+    $("locate").disabled = false;
+    $("locate").textContent = "Find my location";
+  }
+
+  // The service worker is what lets Chrome install this as an app.
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.register("sw.js");
+  }
+</script>
+</body>
+</html>
