@@ -12,11 +12,13 @@
     :root {
       --bg: #f6f4ef; --card: #ffffff; --text: #1d1d1b; --muted: #6b6b66;
       --accent: #1f6f5c; --accent-text: #ffffff; --error: #b3261e; --border: #e2dfd7;
+      --chip: #ece9e1; --star: #8a5a00; --star-bg: #fbefd5; --fav: #1f6f5c; --fav-bg: #dcefe7;
     }
     @media (prefers-color-scheme: dark) {
       :root {
         --bg: #151714; --card: #1f221e; --text: #ecebe6; --muted: #a3a39c;
         --accent: #4fb89c; --accent-text: #0e1a16; --error: #f2b8b5; --border: #33372f;
+        --chip: #2c302a; --star: #f3c96b; --star-bg: #3a3020; --fav: #7fd3b8; --fav-bg: #1d3a31;
       }
     }
     * { box-sizing: border-box; }
@@ -25,99 +27,196 @@
       font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
       padding: max(16px, env(safe-area-inset-top)) 16px 32px;
     }
-    main { max-width: 480px; margin: 0 auto; }
+    main { max-width: 560px; margin: 0 auto; }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
     h1 { font-size: 1.5rem; margin: 8px 0 4px; }
-    .sub { color: var(--muted); margin: 0 0 20px; }
+    .sub { color: var(--muted); margin: 0 0 16px; font-size: .9rem; }
     button {
-      width: 100%; padding: 16px; font-size: 1.05rem; font-weight: 600;
-      border: 0; border-radius: 12px; background: var(--accent); color: var(--accent-text);
+      padding: 12px 16px; font-size: 1rem; font-weight: 600; border: 0; border-radius: 12px;
+      background: var(--accent); color: var(--accent-text);
     }
+    button.wide { width: 100%; padding: 16px; }
     button:disabled { opacity: .6; }
+    button.link { background: none; color: var(--muted); font-weight: 400; text-decoration: underline; padding: 8px; }
     .card {
       background: var(--card); border: 1px solid var(--border); border-radius: 12px;
-      padding: 16px; margin-top: 16px;
+      padding: 14px 16px; margin-top: 12px;
     }
-    .row { display: flex; justify-content: space-between; padding: 6px 0; gap: 12px; }
-    .row span:first-child { color: var(--muted); }
-    .row span:last-child { font-variant-numeric: tabular-nums; text-align: right; }
+    label { display: block; font-weight: 600; margin: 12px 0 4px; }
+    input {
+      width: 100%; padding: 12px; font-size: 1rem; border-radius: 10px;
+      border: 1px solid var(--border); background: var(--bg); color: var(--text);
+    }
+    .hint { color: var(--muted); font-size: .85rem; margin: 4px 0 0; }
     .error { color: var(--error); }
-    a { color: var(--accent); }
+    .place h2 { font-size: 1.05rem; margin: 0 0 4px; }
+    .place h2 a { color: inherit; text-decoration-color: var(--border); }
+    .place p { margin: 4px 0 0; }
+    .meta { color: var(--muted); font-size: .9rem; }
+    .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+    .chip { font-size: .78rem; padding: 2px 8px; border-radius: 999px; background: var(--chip); }
+    .chip.star { background: var(--star-bg); color: var(--star); }
+    .chip.fav { background: var(--fav-bg); color: var(--fav); }
     footer { color: var(--muted); font-size: .8rem; margin-top: 24px; text-align: center; }
     [hidden] { display: none !important; }
   </style>
 </head>
 <body>
 <main>
-  <h1>Nearby Eats</h1>
-  <p class="sub">Step 1: location check</p>
+  <header>
+    <h1>Nearby Eats</h1>
+    <button id="refresh" hidden>Refresh</button>
+  </header>
+  <p class="sub" id="status">Step 2: list from the Sheet</p>
 
-  <button id="locate">Find my location</button>
-
-  <div class="card" id="result" hidden>
-    <div class="row"><span>Latitude</span><span id="lat"></span></div>
-    <div class="row"><span>Longitude</span><span id="lng"></span></div>
-    <div class="row"><span>Accuracy</span><span id="acc"></span></div>
-    <div class="row"><span>Taken at</span><span id="time"></span></div>
-    <p><a id="maplink" target="_blank" rel="noopener">Check this spot in Google Maps</a></p>
-  </div>
+  <!-- One-time connection to the Google Sheet's script -->
+  <form class="card" id="setup" hidden>
+    <strong>Connect to your Google Sheet</strong>
+    <label for="url">Web app URL</label>
+    <input id="url" type="url" required placeholder="https://script.google.com/macros/s/…/exec" autocomplete="off">
+    <p class="hint">From Apps Script → Deploy → Manage deployments.</p>
+    <label for="key">Key</label>
+    <input id="key" required autocomplete="off" spellcheck="false">
+    <p class="hint">From running <code>showAppSetup</code> in Apps Script.</p>
+    <p class="error" id="setup-error" hidden></p>
+    <button class="wide" style="margin-top:16px">Connect</button>
+  </form>
 
   <div class="card error" id="error" hidden></div>
+  <div id="list"></div>
 
-  <footer>v0.1</footer>
+  <footer>
+    v0.2<span id="reconnect" hidden> · <button class="link">Change Sheet connection</button></span>
+  </footer>
 </main>
 
 <script>
   const $ = (id) => document.getElementById(id);
+  const CONFIG_KEY = "nearbyeats.config";
 
-  // Plain-English versions of the browser's geolocation error codes.
-  const ERRORS = {
-    1: "Location permission was denied. In Chrome: tap the icon left of the address bar → Permissions → Location → Allow, then try again.",
-    2: "Your phone couldn't work out a location. Check that Location is turned on in Android's quick settings.",
-    3: "Timed out waiting for a location. Try again, ideally near a window or outdoors.",
-  };
+  // localStorage can throw (private mode, blocked storage), so never trust it blindly.
+  function loadConfig() {
+    try { return JSON.parse(localStorage.getItem(CONFIG_KEY)) || null; } catch { return null; }
+  }
+  function saveConfig(cfg) {
+    try { localStorage.setItem(CONFIG_KEY, JSON.stringify(cfg)); } catch {}
+  }
 
-  $("locate").addEventListener("click", () => {
-    if (!("geolocation" in navigator)) {
-      showError("This browser doesn't support location.");
-      return;
+  async function fetchPlaces(cfg) {
+    let res;
+    try {
+      res = await fetch(`${cfg.url}?key=${encodeURIComponent(cfg.key)}`);
+    } catch {
+      throw new Error("Couldn't reach Google. Check your connection and try again.");
     }
-    $("locate").disabled = true;
-    $("locate").textContent = "Locating…";
-    $("error").hidden = true;
+    let data;
+    try { data = await res.json(); } catch {
+      // Google returns a sign-in web page instead of JSON when access isn't "Anyone".
+      throw new Error("The Sheet's script didn't answer properly. In Apps Script, check the deployment's \"Who has access\" is set to Anyone.");
+    }
+    if (data.error === "bad-key") throw new Error("The key doesn't match. Re-run showAppSetup and copy the key again.");
+    if (data.error) throw new Error("The Sheet's script had a problem: " + data.error);
+    return data;
+  }
 
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        const { latitude, longitude, accuracy } = pos.coords;
-        $("lat").textContent = latitude.toFixed(5);
-        $("lng").textContent = longitude.toFixed(5);
-        $("acc").textContent = `± ${Math.round(accuracy)} m`;
-        $("time").textContent = new Date(pos.timestamp).toLocaleTimeString();
-        $("maplink").href = `https://www.google.com/maps/search/?api=1&query=${latitude},${longitude}`;
-        $("result").hidden = false;
-        resetButton();
-      },
-      (err) => {
-        showError(ERRORS[err.code] || err.message);
-        resetButton();
-      },
-      { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
-    );
+  async function load() {
+    const cfg = loadConfig();
+    if (!cfg) return showSetup();
+    $("setup").hidden = true;
+    $("error").hidden = true;
+    $("refresh").hidden = false;
+    $("reconnect").hidden = false;
+    $("refresh").disabled = true;
+    $("status").textContent = "Loading from the Sheet…";
+    try {
+      const data = await fetchPlaces(cfg);
+      render(data.places);
+      const time = new Date(data.loadedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+      $("status").textContent = `${data.places.length} places · loaded ${time}`;
+    } catch (err) {
+      $("status").textContent = "";
+      $("error").textContent = err.message;
+      $("error").hidden = false;
+    } finally {
+      $("refresh").disabled = false;
+    }
+  }
+
+  function render(places) {
+    const list = $("list");
+    list.replaceChildren();
+    // Recommended first, then favorites, then alphabetical.
+    const order = (p) => (p.section === "recommend" ? 0 : 2) + (p.fav ? 0 : 1);
+    places.sort((a, b) => order(a) - order(b) || a.name.localeCompare(b.name));
+
+    for (const p of places) {
+      const card = el("article", "card place");
+      const h2 = el("h2");
+      if (p.menu) {
+        const a = el("a", "", p.name);
+        a.href = p.menu; a.target = "_blank"; a.rel = "noopener";
+        h2.append(a);
+      } else {
+        h2.textContent = p.name;
+      }
+      card.append(h2);
+      if (p.desc) card.append(el("p", "", p.desc));
+      if (p.hood) card.append(el("p", "meta", "📍 " + p.hood));
+      if (p.deals) card.append(el("p", "meta", "🍹 " + p.deals));
+
+      const chips = el("div", "chips");
+      if (p.section === "recommend") chips.append(el("span", "chip star", "⭐ Been & loved"));
+      if (p.fav) chips.append(el("span", "chip fav", "💚 Favorite"));
+      for (const t of p.tags) chips.append(el("span", "chip", t));
+      if (chips.children.length) card.append(chips);
+
+      list.append(card);
+    }
+  }
+
+  // Builds an element with text set safely (Sheet text is never treated as HTML).
+  function el(tag, className = "", text = "") {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text) node.textContent = text;
+    return node;
+  }
+
+  function showSetup() {
+    const cfg = loadConfig();
+    $("url").value = cfg?.url || "";
+    $("key").value = cfg?.key || "";
+    $("setup").hidden = false;
+    $("refresh").hidden = true;
+    $("reconnect").hidden = true;
+    $("error").hidden = true;
+    $("list").replaceChildren();
+    $("status").textContent = "One-time setup";
+  }
+
+  $("setup").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const cfg = { url: $("url").value.trim(), key: $("key").value.trim() };
+    const btn = e.submitter;
+    btn.disabled = true;
+    $("setup-error").hidden = true;
+    try {
+      await fetchPlaces(cfg); // test the connection before saving it
+      saveConfig(cfg);
+      load();
+    } catch (err) {
+      $("setup-error").textContent = err.message;
+      $("setup-error").hidden = false;
+    } finally {
+      btn.disabled = false;
+    }
   });
 
-  function showError(msg) {
-    $("error").textContent = msg;
-    $("error").hidden = false;
-  }
+  $("refresh").addEventListener("click", load);
+  $("reconnect").addEventListener("click", showSetup);
 
-  function resetButton() {
-    $("locate").disabled = false;
-    $("locate").textContent = "Find my location";
-  }
-
-  // The service worker is what lets Chrome install this as an app.
-  if ("serviceWorker" in navigator) {
-    navigator.serviceWorker.register("sw.js");
-  }
+  if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js");
+  load();
 </script>
 </body>
 </html>

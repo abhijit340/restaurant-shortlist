@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>parseSheet test</title>
+  <style>
+    body { font: 14px/1.4 system-ui, sans-serif; margin: 16px; background: #fff; color: #111; }
+    .pass { color: #1a7f37; } .fail { color: #cf222e; font-weight: 600; }
+    pre { background: #f5f5f5; padding: 8px; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+<h1>parseSheet test</h1>
+<p>Checks the rules in <code>apps-script/Code.gs</code> against made-up rows below. If
+<code>tests/fixture.json</code> exists (made by <code>tools/export_fixture.py</code>, never committed),
+it also shows summary counts for the real list.</p>
+<ul id="checks"></ul>
+<h2>Real list summary</h2>
+<pre id="summary">No fixture.json found.</pre>
+<script>
+// Made-up rows mirroring the real tab's structure: [name, menu, desc, hood, deals].
+const ROWS = [
+  // [row values, background, bold, strike, link]
+  [['Name', 'menu/website', 'description', 'nieghborhood', 'deals?'], '#ffffff', true],
+  [['', '', '', '', ''], '#ffffff'],
+  [['would recommend / want to return', '', '', '', ''], '#ffffff', true],
+  [['Alpha Diner', '', 'burgers', 'fremont', 'HH 4-5'], '#ffffff'],
+  [['Bravo Bistro', 'https://bravo.example/menu', 'french', 'ballard', ''], '#ffffff'],
+  [['AVOID', '', '', '', ''], '#ffffff', true],
+  [['Charlie Grill', '', 'meh', 'belltown', ''], '#ffffff'],
+  [['Delta Deli', '', 'rude', '', ''], '#ffffff'],
+  [['To Try', '', '', '', ''], '#ffffff', true],
+  [['https://example.com/list', '', 'a reference link', '', ''], '#ffffff'],
+  [['Echo Eatery', '', 'noodles', 'u district', ''], '#d9ead3'],
+  [['Foxtrot Café', '', '', '', ''], '#ffffff', false, false, 'https://foxtrot.example'],
+  [['', '', '', '', ''], '#ffffff'],
+  [['Market Hall', '', '', '', ''], '#ffffff', true],
+  [['Golf Grocery', '', 'cheese', 'market', ''], '#b6d7a8'],
+  [['alpha diner', '', 'burgers again', 'market', ''], '#ffffff'],
+  [['Delta Deli ', '', 'duplicate of an AVOID place', 'market', ''], '#ffffff'],
+  [['', '', '', '', ''], '#ffffff'],
+  [['Hotel Kitchen', '', 'closed?', 'downtown', ''], '#ffffff', false, true],
+  [['Big Group - Chef Name', '', '', '', ''], '#ffffff', true],
+  [['India Inn', '', 'curry', 'sodo', ''], '#ffffff'],
+];
+const SYNTHETIC = {
+  values: ROWS.map(r => r[0]),
+  backgrounds: ROWS.map(r => r[1]),
+  bold: ROWS.map(r => Boolean(r[2])),
+  strike: ROWS.map(r => Boolean(r[3])),
+  links: ROWS.map(r => r[4] || ''),
+};
+
+(async () => {
+  const code = await (await fetch('../apps-script/Code.gs')).text();
+  const parseSheet = new Function(code + '\nreturn parseSheet;')();
+  const places = parseSheet(SYNTHETIC);
+  const find = (k) => places.find(p => p.key === k);
+
+  const checks = [
+    ['AVOID places are dropped', !find('charlie grill')],
+    ['AVOID wins over a duplicate elsewhere', !find('delta deli')],
+    ['URL rows are skipped', places.every(p => !/^https?:/i.test(p.name))],
+    ['header rows are not places', !find('to try') && !find('avoid') && !find('market hall') && !find('name')],
+    ['duplicate: recommend wins and gains the group tag', find('alpha diner')?.section === 'recommend' && find('alpha diner')?.tags.includes('Market Hall')],
+    ['bold name-only row starts a group', find('golf grocery')?.tags[0] === 'Market Hall'],
+    ['group name is cut at " - "', find('india inn')?.tags[0] === 'Big Group'],
+    ['blank row ends a group', find('hotel kitchen')?.tags.length === 0],
+    ['name-only row is kept as a place', find('foxtrot cafe')?.section === 'try'],
+    ['accents ignored in keys', Boolean(find('foxtrot cafe'))],
+    ['name-cell link used as menu', find('foxtrot cafe')?.menu === 'https://foxtrot.example'],
+    ['column B link preferred as menu', find('bravo bistro')?.menu === 'https://bravo.example/menu'],
+    ['light green 3 = favorite', find('echo eatery')?.fav === true],
+    ['light green 2 = favorite', find('golf grocery')?.fav === true],
+    ['white = not favorite', find('bravo bistro')?.fav === false],
+    ['strikethrough flagged', find('hotel kitchen')?.struck === true],
+    ['expected count (7 places)', places.length === 7],
+  ];
+  const ul = document.getElementById('checks');
+  for (const [label, ok] of checks) {
+    const li = document.createElement('li');
+    li.className = ok ? 'pass' : 'fail';
+    li.textContent = (ok ? 'PASS  ' : 'FAIL  ') + label;
+    ul.appendChild(li);
+  }
+  window.testResult = { failed: checks.filter(c => !c[1]).map(c => c[0]) };
+
+  const res = await fetch('fixture.json');
+  if (!res.ok) return;
+  const real = parseSheet(await res.json());
+  const count = (f) => real.filter(f).length;
+  const tags = {};
+  real.forEach(p => p.tags.forEach(t => tags[t] = (tags[t] || 0) + 1));
+  const summary = {
+    total: real.length,
+    recommend: count(p => p.section === 'recommend'),
+    try: count(p => p.section === 'try'),
+    favorites: count(p => p.fav),
+    withDeals: count(p => p.deals),
+    withMenuLink: count(p => p.menu),
+    noNeighborhood: count(p => !p.hood),
+    struck: count(p => p.struck),
+    tags,
+  };
+  document.getElementById('summary').textContent = JSON.stringify(summary, null, 2);
+  window.testResult.summary = summary;
+})().catch(err => {
+  document.body.insertAdjacentHTML('beforeend', `<p class="fail">${err}</p>`);
+  window.testResult = { error: String(err) };
+});
+</script>
+</body>
+</html>

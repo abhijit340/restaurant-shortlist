@@ -1,6 +1,7 @@
 # This repo is public (GitHub Pages). Never commit the restaurant list or secrets.
 *.xlsx
 *.csv
+tests/fixture.json
 .env
 
 # Planning docs stay local only (they contain personal details)
