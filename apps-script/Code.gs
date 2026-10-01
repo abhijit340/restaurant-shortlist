@@ -1,11 +1,19 @@
 /**
  * Nearby Eats: backend script that lives inside the Google Sheet
- * (Extensions → Apps Script). It reads the restaurant tab and serves it to the
- * app as JSON. The secret key lives in Script Properties, never in this file.
+ * (Extensions → Apps Script). It reads the restaurant tab, looks places up on
+ * Google, and serves everything to the app as JSON. Secrets (the app key and
+ * MAPS_KEY) live in Script Properties, never in this file.
  */
 
 const SOURCE_TAB = 'Seattle dining';
+const DATA_TAB = 'app data'; // managed by this script; the source tab is never written
 const COLS = 5; // Name, menu/website, description, neighborhood, deals?
+
+// Hard monthly caps, about 90% of Google's free allowances (checked 2026-09-30).
+// Every Google request goes through spend_(), which refuses past these.
+const MONTHLY_LIMITS = { textSearch: 900, matrixTransit: 4500, matrixWalk: 9000, geocode: 9000 };
+
+const SEATTLE = { latitude: 47.6062, longitude: -122.3321 };
 
 // Section header text (lowercase) → section id.
 const SECTIONS = {
@@ -23,7 +31,7 @@ function doGet(e) {
   const key = PropertiesService.getScriptProperties().getProperty('KEY');
   if (!key || !e || e.parameter.key !== key) return json_({ error: 'bad-key' });
   try {
-    return json_({ places: readPlaces_(), loadedAt: new Date().toISOString() });
+    return json_({ places: withAppData_(readSourcePlaces_(), readAppData_()), loadedAt: new Date().toISOString() });
   } catch (err) {
     return json_({ error: String(err) });
   }
@@ -40,7 +48,7 @@ function showAppSetup() {
     props.setProperty('KEY', key);
   }
   Logger.log('Key for the app: ' + key);
-  Logger.log('Places found: ' + readPlaces_().length);
+  Logger.log('Places found: ' + readSourcePlaces_().length);
 }
 
 /** Run if the key ever leaks: the old key stops working, then run showAppSetup. */
@@ -49,9 +57,130 @@ function resetKey() {
   Logger.log('Key deleted. Run showAppSetup to make a new one, then re-enter it in the app.');
 }
 
+// ---------- Sheet menu ----------
+
+function onOpen() {
+  SpreadsheetApp.getUi().createMenu('Nearby Eats')
+    .addItem('Fill missing info', 'fillMissing')
+    .addItem('Show Google usage this month', 'showUsage')
+    .addToUi();
+}
+
+function showUsage() {
+  const props = PropertiesService.getScriptProperties();
+  const lines = Object.keys(MONTHLY_LIMITS).map(sku =>
+    `${sku}: ${props.getProperty(usageKey_(sku)) || 0} of ${MONTHLY_LIMITS[sku]}`);
+  SpreadsheetApp.getUi().alert(`Google usage for ${month_()}\n\n${lines.join('\n')}`);
+}
+
+// ---------- Auto-fill: look places up on Google ----------
+
+const RUN_BUDGET_MS = 4.5 * 60 * 1000; // Apps Script stops any run at 6 minutes
+const BATCH = 10;
+const BATCH_INTERVAL_MS = 12000;       // 10 requests per 12 s = 50 a minute, under the 60/min quota
+
+/**
+ * Looks up every place that has no Google data yet, or whose search text changed
+ * (for example you added a neighborhood to help it). Saves progress to the
+ * "app data" tab and, if there's more to do, continues by itself a minute later.
+ */
+function fillMissing() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(1000)) return notify_('Already running. Check the "app data" tab in a few minutes.');
+  const started = Date.now();
+  let data, places, done = 0, remaining = 0, stopReason = '';
+  try {
+    deleteTriggers_('continueFill');
+    ensureNightly_();
+    const apiKey = PropertiesService.getScriptProperties().getProperty('MAPS_KEY');
+    if (!apiKey) throw new Error('MAPS_KEY is missing from Script Properties.');
+
+    places = readSourcePlaces_();
+    data = readAppData_();
+    const todo = places.filter(p => needsLookup_(p, data.get(p.key)));
+    remaining = todo.length;
+
+    for (let i = 0; i < todo.length; i += BATCH) {
+      if (Date.now() - started > RUN_BUDGET_MS) { stopReason = 'time'; break; }
+      const batch = todo.slice(i, i + BATCH);
+      if (!spend_('textSearch', batch.length)) { stopReason = 'limit'; break; }
+      const t0 = Date.now();
+      const responses = UrlFetchApp.fetchAll(batch.map(p => searchRequest_(p, apiKey)));
+      let rateLimited = false;
+      batch.forEach((p, j) => {
+        const rec = toRecord_(p, responses[j].getResponseCode(), responses[j].getContentText());
+        if (rec.status === 'retry') { rateLimited = true; return; }
+        data.set(p.key, rec);
+        done++;
+        remaining--;
+      });
+      if (rateLimited) { stopReason = 'rate'; break; }
+      const wait = BATCH_INTERVAL_MS - (Date.now() - t0);
+      if (wait > 0 && i + BATCH < todo.length) Utilities.sleep(wait);
+    }
+  } finally {
+    if (data && places) writeAppData_(data, places);
+    lock.releaseLock();
+  }
+
+  if (remaining > 0 && stopReason !== 'limit') {
+    ScriptApp.newTrigger('continueFill').timeBased().after(60 * 1000).create();
+  }
+  const counts = { 'not found': 0, 'check name': 0 };
+  data.forEach(r => { if (r.status in counts) counts[r.status]++; });
+  notify_([
+    `Looked up ${done} places.`,
+    remaining === 0 ? 'All done.'
+      : stopReason === 'limit' ? `${remaining} left, but this month's safety cap was reached. They'll be filled next month.`
+      : `${remaining} left. Continuing automatically in about a minute.`,
+    `Not found: ${counts['not found']}. Check name: ${counts['check name']}. (See the "${DATA_TAB}" tab.)`,
+  ].join(' '));
+}
+
+function continueFill() { fillMissing(); }
+function nightlyFill() { fillMissing(); }
+
+function ensureNightly_() {
+  if (ScriptApp.getProjectTriggers().some(t => t.getHandlerFunction() === 'nightlyFill')) return;
+  ScriptApp.newTrigger('nightlyFill').timeBased().everyDays(1).atHour(3).create();
+}
+
+function deleteTriggers_(handler) {
+  ScriptApp.getProjectTriggers()
+    .filter(t => t.getHandlerFunction() === handler)
+    .forEach(t => ScriptApp.deleteTrigger(t));
+}
+
+function notify_(msg) {
+  Logger.log(msg);
+  try { SpreadsheetApp.getActive().toast(msg, 'Nearby Eats', 15); } catch (e) { /* no UI in triggers */ }
+}
+
+// ---------- Usage counter (hard monthly cap) ----------
+
+/** Records n requests for a Google service; returns false (and records nothing) past the cap. */
+function spend_(sku, n) {
+  const lock = LockService.getDocumentLock();
+  lock.waitLock(10000);
+  try {
+    const props = PropertiesService.getScriptProperties();
+    const used = Number(props.getProperty(usageKey_(sku)) || 0);
+    if (used + n > MONTHLY_LIMITS[sku]) return false;
+    props.setProperty(usageKey_(sku), String(used + n));
+    return true;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function usageKey_(sku) { return 'usage:' + month_() + ':' + sku; }
+
+// Google's free allowances reset monthly on Pacific time.
+function month_() { return Utilities.formatDate(new Date(), 'America/Los_Angeles', 'yyyy-MM'); }
+
 // ---------- Reading the tab ----------
 
-function readPlaces_() {
+function readSourcePlaces_() {
   const sheet = SpreadsheetApp.getActive().getSheetByName(SOURCE_TAB);
   if (!sheet) throw new Error('No tab named "' + SOURCE_TAB + '"');
   const rows = sheet.getLastRow();
@@ -135,6 +264,160 @@ function isGreen_(hex) {
   if (!m) return false;
   const [r, g, b] = m.slice(1).map(x => parseInt(x, 16));
   return g > r + 10 && g > b + 10;
+}
+
+// ---------- Google lookup helpers (pure, testable) ----------
+
+const PLACE_FIELDS = ['id', 'displayName', 'formattedAddress', 'location', 'primaryTypeDisplayName',
+  'businessStatus', 'googleMapsUri', 'regularOpeningHours.periods', 'utcOffsetMinutes']
+  .map(f => 'places.' + f).join(',');
+
+/**
+ * What to search for. A neighborhood like "capitol hill, ballard" or "several locs"
+ * means a chain: search the name alone and keep every matching location.
+ */
+function buildQuery_(p) {
+  const multi = /,|&|\band\b|several|others|more|varies|multiple|locs|locations/i.test(p.hood);
+  const hint = multi ? '' : p.hood
+    .replace(/[?()]/g, ' ')
+    .replace(/\b(others?|more|etc)\b/gi, ' ')
+    .replace(/\s+/g, ' ').trim();
+  return { text: [p.name, hint].filter(Boolean).join(' '), multi };
+}
+
+function searchRequest_(p, apiKey) {
+  const q = buildQuery_(p);
+  return {
+    url: 'https://places.googleapis.com/v1/places:searchText',
+    method: 'post',
+    contentType: 'application/json',
+    muteHttpExceptions: true,
+    headers: { 'X-Goog-Api-Key': apiKey, 'X-Goog-FieldMask': PLACE_FIELDS },
+    payload: JSON.stringify({
+      textQuery: q.text,
+      pageSize: q.multi ? 10 : 1,
+      locationBias: { circle: { center: SEATTLE, radius: 50000 } },
+    }),
+  };
+}
+
+/** Turns one Google response into the record saved in the "app data" tab. */
+function toRecord_(p, code, body) {
+  if (code === 429) return { status: 'retry' }; // per-minute quota hit; try again next run
+  const rec = { key: p.key, name: p.name, row: p.row, query: buildQuery_(p).text, at: today_(), locs: [] };
+  if (code !== 200) return Object.assign(rec, { status: 'error ' + code });
+  const found = (JSON.parse(body).places || []).filter(g => g.location);
+  if (!found.length) return Object.assign(rec, { status: 'not found' });
+  const matches = found.filter(g => namesMatch_(p.name, g.displayName && g.displayName.text));
+  return Object.assign(rec, {
+    status: matches.length ? 'ok' : 'check name',
+    locs: (matches.length ? matches : found.slice(0, 1)).map(compactLoc_),
+  });
+}
+
+function compactLoc_(g) {
+  return {
+    id: g.id,
+    name: g.displayName ? g.displayName.text : '',
+    addr: g.formattedAddress || '',
+    lat: g.location.latitude,
+    lng: g.location.longitude,
+    cuisine: g.primaryTypeDisplayName ? g.primaryTypeDisplayName.text : '',
+    status: g.businessStatus || '',
+    maps: g.googleMapsUri || '',
+    utc: g.utcOffsetMinutes,
+    // Each period as [openDay, openHHMM, closeDay, closeHHMM]; days 0 = Sunday.
+    hours: ((g.regularOpeningHours || {}).periods || []).map(x => [
+      ...(x.open ? [x.open.day, x.open.hour * 100 + (x.open.minute || 0)] : []),
+      ...(x.close ? [x.close.day, x.close.hour * 100 + (x.close.minute || 0)] : []),
+    ]),
+  };
+}
+
+// Words too generic to prove two names are the same place.
+const GENERIC_WORDS = new Set(['the', 'and', 'cafe', 'bar', 'restaurant', 'seattle', 'kitchen',
+  'grill', 'house', 'eatery', 'bistro', 'shop', 'company']);
+
+function nameTokens_(s) {
+  return normKey_(s || '').split(' ').filter(t => t.length >= 3 && !GENERIC_WORDS.has(t));
+}
+
+/** True if Google's name shares a distinctive word with ours ("joes" ≈ "Joe's Noodle Shack"). */
+function namesMatch_(ours, theirs) {
+  const a = nameTokens_(ours);
+  const b = nameTokens_(theirs);
+  if (!a.length) return normKey_(ours) === normKey_(theirs || '');
+  return a.some(t => b.some(u => u.startsWith(t) || t.startsWith(u)));
+}
+
+function overallStatus_(locs) {
+  if (!locs.length) return '';
+  if (locs.every(l => l.status === 'CLOSED_PERMANENTLY')) return 'closed permanently';
+  if (locs.every(l => l.status !== 'OPERATIONAL')) return 'closed temporarily';
+  return 'open';
+}
+
+function needsLookup_(p, rec) {
+  return !rec || /^error/.test(rec.status) || rec.query !== buildQuery_(p).text;
+}
+
+/** Adds Google data to each place for the app (closed locations dropped). */
+function withAppData_(places, data) {
+  return places.map(p => {
+    const rec = data.get(p.key);
+    const locs = rec ? rec.locs : [];
+    return Object.assign(p, {
+      cuisine: locs[0] ? locs[0].cuisine : '',
+      closed: overallStatus_(locs),
+      locs: locs.filter(l => l.status !== 'CLOSED_PERMANENTLY')
+        .map(l => ({ lat: l.lat, lng: l.lng, addr: l.addr, maps: l.maps })),
+    });
+  });
+}
+
+function today_() { return Utilities.formatDate(new Date(), 'America/Los_Angeles', 'yyyy-MM-dd'); }
+
+// ---------- The "app data" tab ----------
+
+const DATA_HEADERS = ['key', 'Your name', 'Sheet row', 'Status', 'Google name', 'Address',
+  'Locations', 'Cuisine (Google)', 'Open/closed', 'Searched for', 'Looked up', 'data (JSON)'];
+const STATUS_COLORS = { 'not found': '#f4cccc', 'check name': '#fff2cc' };
+
+function readAppData_() {
+  const map = new Map();
+  const sheet = SpreadsheetApp.getActive().getSheetByName(DATA_TAB);
+  if (!sheet || sheet.getLastRow() < 2) return map;
+  const rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, DATA_HEADERS.length).getValues();
+  for (const r of rows) {
+    if (!r[0]) continue;
+    let locs = [];
+    try { locs = JSON.parse(r[11] || '[]'); } catch (e) { /* hand-edited cell; look it up again */ }
+    map.set(r[0], { key: r[0], name: r[1], row: r[2], status: r[3], query: r[9], at: r[10], locs });
+  }
+  return map;
+}
+
+/** Rewrites the tab in sheet order. Places no longer in the list (or moved to AVOID) drop off. */
+function writeAppData_(data, places) {
+  const ss = SpreadsheetApp.getActive();
+  const sheet = ss.getSheetByName(DATA_TAB) || ss.insertSheet(DATA_TAB);
+  const rows = [];
+  const colors = [];
+  for (const p of places) {
+    const r = data.get(p.key);
+    if (!r) continue;
+    const first = r.locs[0] || {};
+    rows.push([r.key, p.name, p.row, r.status, first.name || '', first.addr || '', r.locs.length,
+      first.cuisine || '', overallStatus_(r.locs), r.query, r.at, JSON.stringify(r.locs)]);
+    colors.push(STATUS_COLORS[r.status] || null);
+  }
+  sheet.clearContents();
+  sheet.getRange(1, 1, 1, DATA_HEADERS.length).setValues([DATA_HEADERS]).setFontWeight('bold');
+  sheet.setFrozenRows(1);
+  if (!rows.length) return;
+  sheet.getRange(2, 1, rows.length, DATA_HEADERS.length).setValues(rows);
+  sheet.getRange(2, 4, sheet.getMaxRows() - 1, 1).setBackground(null);
+  sheet.getRange(2, 4, rows.length, 1).setBackgrounds(colors.map(c => [c]));
 }
 
 function json_(obj) {

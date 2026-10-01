@@ -57,6 +57,7 @@
     .chip { font-size: .78rem; padding: 2px 8px; border-radius: 999px; background: var(--chip); }
     .chip.star { background: var(--star-bg); color: var(--star); }
     .chip.fav { background: var(--fav-bg); color: var(--fav); }
+    .chip.warn { background: var(--chip); color: var(--error); }
     footer { color: var(--muted); font-size: .8rem; margin-top: 24px; text-align: center; }
     [hidden] { display: none !important; }
   </style>
@@ -67,7 +68,7 @@
     <h1>Nearby Eats</h1>
     <button id="refresh" hidden>Refresh</button>
   </header>
-  <p class="sub" id="status">Step 2: list from the Sheet</p>
+  <p class="sub" id="status">Step 3: list with Google info</p>
 
   <!-- One-time connection to the Google Sheet's script -->
   <form class="card" id="setup" hidden>
@@ -86,7 +87,7 @@
   <div id="list"></div>
 
   <footer>
-    v0.2<span id="reconnect" hidden> · <button class="link">Change Sheet connection</button></span>
+    v0.3<span id="reconnect" hidden> · <button class="link">Change Sheet connection</button></span>
   </footer>
 </main>
 
@@ -160,13 +161,15 @@
         h2.textContent = p.name;
       }
       card.append(h2);
-      if (p.desc) card.append(el("p", "", p.desc));
+      if (p.desc || p.cuisine) card.append(el("p", "", p.desc || p.cuisine));
       if (p.hood) card.append(el("p", "meta", "📍 " + p.hood));
       if (p.deals) card.append(el("p", "meta", "🍹 " + p.deals));
 
       const chips = el("div", "chips");
       if (p.section === "recommend") chips.append(el("span", "chip star", "⭐ Been & loved"));
       if (p.fav) chips.append(el("span", "chip fav", "💚 Favorite"));
+      if (p.closed === "closed permanently") chips.append(el("span", "chip warn", "⚠️ Closed permanently (Google)"));
+      if (p.closed === "closed temporarily") chips.append(el("span", "chip warn", "⏸ Temporarily closed (Google)"));
       for (const t of p.tags) chips.append(el("span", "chip", t));
       if (chips.children.length) card.append(chips);
 

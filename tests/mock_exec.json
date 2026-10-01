@@ -4,6 +4,6 @@
     { "key": "test noodle bar", "name": "Test Noodle Bar", "section": "try", "row": 140, "desc": "hand-pulled noodles, spicy", "hood": "capitol hill", "deals": "", "menu": "", "tags": [], "fav": false, "struck": false },
     { "key": "sample oyster house", "name": "Sample Oyster House", "section": "recommend", "row": 5, "desc": "oysters, small plates", "hood": "ballard", "deals": "HH daily 3-5: $1 off drafts", "menu": "https://example.com/menu", "tags": [], "fav": false, "struck": false },
     { "key": "demo market cafe", "name": "Demo Market Cafe", "section": "try", "row": 241, "desc": "pastries, coffee", "hood": "the market", "deals": "", "menu": "", "tags": ["Market Hall"], "fav": true, "struck": false },
-    { "key": "placeholder pizza", "name": "Placeholder <b>Pizza</b>", "section": "try", "row": 300, "desc": "", "hood": "", "deals": "", "menu": "", "tags": [], "fav": false, "struck": false }
+    { "key": "placeholder pizza", "name": "Placeholder <b>Pizza</b>", "section": "try", "row": 300, "cuisine": "Pizza restaurant", "closed": "closed permanently", "desc": "", "hood": "", "deals": "", "menu": "", "tags": [], "fav": false, "struck": false }
   ]
 }

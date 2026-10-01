@@ -51,9 +51,21 @@ const SYNTHETIC = {
   links: ROWS.map(r => r[4] || ''),
 };
 
+// Stand-in for the one Apps Script service the pure helpers touch.
+window.Utilities = { formatDate: () => '2026-09-30' };
+
+// Made-up Google Text Search results.
+const g = (name, lat, status = 'OPERATIONAL', periods = []) => ({
+  id: 'id-' + name, displayName: { text: name }, formattedAddress: name + ' St, Seattle',
+  location: { latitude: lat, longitude: -122.3 }, primaryTypeDisplayName: { text: 'Restaurant' },
+  businessStatus: status, googleMapsUri: 'https://maps.example/' + lat, utcOffsetMinutes: -420,
+  regularOpeningHours: { periods },
+});
+
 (async () => {
   const code = await (await fetch('../apps-script/Code.gs')).text();
-  const parseSheet = new Function(code + '\nreturn parseSheet;')();
+  const { parseSheet, buildQuery_, toRecord_, namesMatch_, overallStatus_, needsLookup_, withAppData_ } =
+    new Function(code + '\nreturn { parseSheet, buildQuery_, toRecord_, namesMatch_, overallStatus_, needsLookup_, withAppData_ };')();
   const places = parseSheet(SYNTHETIC);
   const find = (k) => places.find(p => p.key === k);
 
@@ -76,6 +88,42 @@ const SYNTHETIC = {
     ['strikethrough flagged', find('hotel kitchen')?.struck === true],
     ['expected count (7 places)', places.length === 7],
   ];
+
+  // ----- Google lookup helpers -----
+  const P = (name, hood = '') => ({ key: name.toLowerCase(), name, hood, row: 9 });
+  const q = (hood) => buildQuery_(P('Alpha Diner', hood));
+  const chain = toRecord_(P('Echo Eatery', 'u district, fremont'), 200, JSON.stringify({ places: [
+    g('Echo Eatery - U District', 47.66, 'OPERATIONAL', [{ open: { day: 1, hour: 11, minute: 0 }, close: { day: 1, hour: 22, minute: 30 } }]),
+    g('Unrelated Pho', 47.65),
+    g('Echo Eatery Fremont', 47.65, 'CLOSED_PERMANENTLY'),
+  ] }));
+  const single = toRecord_(P('Golf Grocery', 'market'), 200, JSON.stringify({ places: [g('Totally Different Pho', 47.6)] }));
+  const stored = { status: 'ok', query: 'Alpha Diner capitol hill' };
+
+  checks.push(
+    ['query: single neighborhood is added', q('capitol hill').text === 'Alpha Diner capitol hill' && !q('capitol hill').multi],
+    ['query: comma list = chain, name only', q('capitol hill, ballard').text === 'Alpha Diner' && q('capitol hill, ballard').multi],
+    ['query: "others?" = chain', q('capitol hill, others? ').multi],
+    ['query: brackets and ? stripped', q('west seattle (alki)').text === 'Alpha Diner west seattle alki'],
+    ['query: no neighborhood = name only', q('').text === 'Alpha Diner'],
+    ['match: apostrophes ("joes")', namesMatch_('joes noodle shack', "Joe's Noodle Shack")],
+    ['match: shared distinctive word', namesMatch_('Pelican/otter + heron', 'The Otter and the Heron')],
+    ['match: generic words alone don\'t match', !namesMatch_('Echo Cafe', 'Delta Cafe')],
+    ['match: different name rejected', !namesMatch_('Echo Eatery', 'Totally Different Pho')],
+    ['429 = retry later, nothing saved', toRecord_(P('X'), 429, '').status === 'retry'],
+    ['HTTP error recorded', toRecord_(P('X'), 500, '').status === 'error 500'],
+    ['no results = not found', toRecord_(P('X'), 200, '{}').status === 'not found'],
+    ['chain keeps only name matches', chain.status === 'ok' && chain.locs.length === 2],
+    ['hours compacted to [day, HHMM, day, HHMM]', JSON.stringify(chain.locs[0].hours) === '[[1,1100,1,2230]]'],
+    ['wrong single result flagged "check name"', single.status === 'check name' && single.locs.length === 1],
+    ['status: all closed = closed permanently', overallStatus_([{ status: 'CLOSED_PERMANENTLY' }]) === 'closed permanently'],
+    ['status: one open location = open', overallStatus_(chain.locs) === 'open'],
+    ['lookup needed: new place', needsLookup_(P('Alpha Diner', 'capitol hill'), undefined)],
+    ['lookup skipped: unchanged place', !needsLookup_(P('Alpha Diner', 'capitol hill'), stored)],
+    ['lookup redone: neighborhood edited', needsLookup_(P('Alpha Diner', 'fremont'), stored)],
+    ['lookup redone: previous error', needsLookup_(P('Alpha Diner', 'capitol hill'), { ...stored, status: 'error 500' })],
+    ['app gets only open locations', withAppData_([P('Echo Eatery')], new Map([['echo eatery', chain]]))[0].locs.length === 1],
+  );
   const ul = document.getElementById('checks');
   for (const [label, ok] of checks) {
     const li = document.createElement('li');
