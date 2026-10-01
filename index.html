@@ -140,7 +140,7 @@
   <button id="more" hidden>Show more</button>
 
   <footer>
-    v0.7<span id="reconnect" hidden> · <button class="link">Change Sheet connection</button></span>
+    v0.8<span id="reconnect" hidden> · <button class="link">Change Sheet connection</button></span>
   </footer>
 </main>
 
@@ -306,10 +306,13 @@
    */
   function trip(t) {
     if (!t || t.failed) return null;
-    const min = t.transit ?? t.walk;
+    // For short hops Google's "transit" route is often just the walk; only count
+    // transit when it's at least 2 minutes faster, so the walk isn't shown twice.
+    const transit = t.transit != null && (t.walk == null || t.transit < t.walk - 1) ? t.transit : null;
+    const min = transit ?? t.walk;
     if (min == null) return null;
-    const options = [t.walk, t.transit].filter((m) => m != null);
-    return { min, mode: t.transit != null ? "transit" : "walk", walk: t.walk, transit: t.transit, fastest: Math.min(...options) };
+    const options = [t.walk, transit].filter((m) => m != null);
+    return { min, mode: transit != null ? "transit" : "walk", walk: t.walk, transit, fastest: Math.min(...options) };
   }
 
   // ---------- Opening hours ----------
