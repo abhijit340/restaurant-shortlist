@@ -62,9 +62,14 @@
     .toggle[aria-pressed="true"] { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
     .row select { width: auto; padding: 8px 12px; font-size: .9rem; border-radius: 999px; }
 
-    /* Place cards */
+    /* Place cards: the whole card opens the place in Google Maps (a "stretched" link);
+       other links on the card sit above it. */
+    .place { position: relative; }
+    .place:active { background: var(--chip); }
     .place h2 { font-size: 1.05rem; margin: 0; flex: 1; }
-    .place h2 a { color: inherit; text-decoration-color: var(--border); }
+    .place h2 a { color: inherit; text-decoration: none; }
+    .place h2 a::after { content: ""; position: absolute; inset: 0; border-radius: 12px; }
+    .place .above { position: relative; z-index: 1; }
     .place .top { display: flex; gap: 12px; align-items: baseline; margin-bottom: 4px; }
     .dist { font-weight: 600; color: var(--accent); white-space: nowrap; font-variant-numeric: tabular-nums; }
     .place p { margin: 4px 0 0; }
@@ -135,7 +140,7 @@
   <button id="more" hidden>Show more</button>
 
   <footer>
-    v0.5<span id="reconnect" hidden> · <button class="link">Change Sheet connection</button></span>
+    v0.6<span id="reconnect" hidden> · <button class="link">Change Sheet connection</button></span>
   </footer>
 </main>
 
@@ -448,13 +453,7 @@
     const c = el("article", "card place" + ((hours && !hours.open) || p.closed === "closed temporarily" ? " dim" : ""));
     const top = el("div", "top");
     const h2 = el("h2");
-    if (p.menu) {
-      const a = el("a", "", p.name);
-      a.href = p.menu; a.target = "_blank"; a.rel = "noopener";
-      h2.append(a);
-    } else {
-      h2.textContent = p.name;
-    }
+    h2.append(link(mapsUrl(p, near), p.name));
     top.append(h2);
     if (trip) top.append(el("span", "dist", `${trip.min} min ${trip.mode === "walk" ? "🚶" : "🚌"}`));
     else if (near) top.append(el("span", "dist", formatMiles(near.d)));
@@ -477,17 +476,10 @@
     // Hours on arrival (or now, for places without a travel time).
     if (hours) c.append(hoursLine(hours, arrive, Boolean(trip)));
 
-    // Neighborhood, linking to the closest location in Google Maps.
-    const where = el("p", "meta", "📍 ");
-    const label = p.hood || (near ? near.loc.addr : "");
-    if (near && near.loc.maps) {
-      const a = el("a", "", label || "Map");
-      a.href = near.loc.maps; a.target = "_blank"; a.rel = "noopener";
-      where.append(a);
-    } else {
-      where.append(label || "No location yet");
-    }
+    // Neighborhood, chain size, and the menu link (which sits above the card-wide Maps link).
+    const where = el("p", "meta", "📍 " + (p.hood || (near ? near.loc.addr : "") || "No location yet"));
     if (p.locs && p.locs.length > 1) where.append(` · nearest of ${p.locs.length}`);
+    if (p.menu) where.append(" · ", link(p.menu, "🍽 Menu", "above"));
     c.append(where);
 
     if (p.deals) c.append(el("p", "meta", "🍹 " + p.deals));
@@ -520,6 +512,23 @@
     const opens = new Date(arrive.getTime() + h.opensIn * 60000);
     const otherDay = opens.toDateString() !== arrive.toDateString();
     return el("p", "hours-closed", `🔴 Closed ${isArrival ? "when you'd arrive" : "now"} · opens ${clock(opens, otherDay)}`);
+  }
+
+  /**
+   * The place's Google Maps listing (photos, reviews, Directions): the nearest
+   * location's page, or a Maps search when Google hasn't located it.
+   */
+  function mapsUrl(p, near) {
+    const loc = near ? near.loc : (p.locs || [])[0];
+    if (loc && loc.maps) return loc.maps;
+    const q = [p.name, p.hood, "Seattle"].filter(Boolean).join(" ");
+    return "https://www.google.com/maps/search/?api=1&query=" + encodeURIComponent(q);
+  }
+
+  function link(href, text, className = "") {
+    const a = el("a", className, text);
+    a.href = href; a.target = "_blank"; a.rel = "noopener";
+    return a;
   }
 
   // Builds an element with text set safely (Sheet text is never treated as HTML).

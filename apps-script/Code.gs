@@ -11,7 +11,7 @@ const COLS = 5; // Name, menu/website, description, neighborhood, deals?
 
 // Hard monthly caps, about 90% of Google's free allowances (checked 2026-09-30).
 // Every Google request goes through spend_(), which refuses past these.
-const MONTHLY_LIMITS = { textSearch: 900, matrixTransit: 4500, matrixWalk: 9000, geocode: 9000 };
+const MONTHLY_LIMITS = { textSearch: 900, placeDetails: 900, matrixTransit: 4500, matrixWalk: 9000, geocode: 9000 };
 
 const SEATTLE = { latitude: 47.6062, longitude: -122.3321 };
 
@@ -63,6 +63,7 @@ function resetKey() {
 function onOpen() {
   SpreadsheetApp.getUi().createMenu('Nearby Eats')
     .addItem('Fill missing info', 'fillMissing')
+    .addItem('Refresh hours now (10 oldest places)', 'refreshHoursNow')
     .addItem('Show Google usage this month', 'showUsage')
     .addToUi();
 }
@@ -140,7 +141,77 @@ function fillMissing() {
 }
 
 function continueFill() { fillMissing(); }
-function nightlyFill() { fillMissing(); }
+
+/** Runs at 3 am: look up new rows, then refresh the oldest hours. */
+function nightlyFill() {
+  fillMissing();
+  refreshStale_(REFRESH_PER_NIGHT, REFRESH_AFTER_DAYS);
+}
+
+// ---------- Monthly refresh: hours, closures, new chain branches ----------
+
+const REFRESH_AFTER_DAYS = 28; // each place is refreshed about once a month…
+const REFRESH_PER_NIGHT = 40;  // …a few dozen a night, so it never bunches up
+
+function refreshHoursNow() { refreshStale_(10, 0); }
+
+/**
+ * Refreshes up to `limit` places whose Google data is at least `minAgeDays` old,
+ * oldest first. Single-location places are refreshed by their Google ID (Place
+ * Details), which keeps the exact match and your ok/skip marks; chains are
+ * searched again so new branches appear and closed ones drop off.
+ */
+function refreshStale_(limit, minAgeDays) {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(1000)) return notify_('Busy with another update. Try again in a few minutes.');
+  let refreshed = 0, capped = false;
+  try {
+    const apiKey = PropertiesService.getScriptProperties().getProperty('MAPS_KEY');
+    if (!apiKey) throw new Error('MAPS_KEY is missing from Script Properties.');
+    const places = readSourcePlaces_();
+    const byKey = new Map(places.map(p => [p.key, p]));
+    const data = readAppData_();
+    const due = pickStale_(places, data, new Date(), minAgeDays, limit);
+
+    for (let i = 0; i < due.length; i += BATCH) {
+      const batch = due.slice(i, i + BATCH);
+      const byId = batch.filter(r => r.locs.length === 1 && r.locs[0].id);
+      const bySearch = batch.filter(r => !byId.includes(r));
+      if ((byId.length && !spend_('placeDetails', byId.length)) ||
+          (bySearch.length && !spend_('textSearch', bySearch.length))) { capped = true; break; }
+
+      const t0 = Date.now();
+      const res = UrlFetchApp.fetchAll(
+        byId.map(r => detailsRequest_(r.locs[0].id, apiKey))
+          .concat(bySearch.map(r => searchRequest_(byKey.get(r.key), apiKey))));
+      byId.forEach((r, j) => {
+        data.set(r.key, refreshFromDetails_(r, res[j].getResponseCode(), res[j].getContentText()));
+      });
+      bySearch.forEach((r, j) => {
+        const x = res[byId.length + j];
+        data.set(r.key, refreshFromSearch_(r, toRecord_(byKey.get(r.key), x.getResponseCode(), x.getContentText())));
+      });
+      refreshed += batch.length;
+
+      const wait = BATCH_INTERVAL_MS - (Date.now() - t0);
+      if (wait > 0 && i + BATCH < due.length) Utilities.sleep(wait);
+    }
+    writeAppData_(data, places);
+  } finally {
+    lock.releaseLock();
+  }
+  notify_(`Refreshed hours for ${refreshed} places.` + (capped ? " Stopped at this month's safety cap." : ''));
+}
+
+function detailsRequest_(placeId, apiKey) {
+  return {
+    url: 'https://places.googleapis.com/v1/places/' + encodeURIComponent(placeId),
+    method: 'get',
+    muteHttpExceptions: true,
+    // Same fields as Text Search, without its "places." prefix.
+    headers: { 'X-Goog-Api-Key': apiKey, 'X-Goog-FieldMask': PLACE_FIELDS.replace(/places\./g, '') },
+  };
+}
 
 function ensureNightly_() {
   if (ScriptApp.getProjectTriggers().some(t => t.getHandlerFunction() === 'nightlyFill')) return;
@@ -445,6 +516,33 @@ function overallStatus_(locs) {
   return 'open';
 }
 
+/** Matched places whose data is at least minAgeDays old, oldest first (unreadable dates count as oldest). */
+function pickStale_(places, data, now, minAgeDays, limit) {
+  const time = (r) => { const t = new Date(r.at).getTime(); return isNaN(t) ? 0 : t; };
+  return places.map(p => data.get(p.key))
+    .filter(r => r && r.locs.length && /^(ok|check name)$/.test(r.status) &&
+      (now.getTime() - time(r)) / 86400000 >= minAgeDays)
+    .sort((a, b) => time(a) - time(b))
+    .slice(0, limit);
+}
+
+/** Place Details answer → refreshed record. Keeps the status (including your "ok"). */
+function refreshFromDetails_(rec, code, body) {
+  if (code === 404) return Object.assign({}, rec, { status: 'error 404' }); // ID retired: search again tonight
+  if (code !== 200) return rec;                                            // try again another night
+  const g = JSON.parse(body);
+  if (!g.location) return rec;
+  return Object.assign({}, rec, { locs: [compactLoc_(g)], at: today_() });
+}
+
+/** Chain re-search → refreshed record; keeps the old data if the search failed. */
+function refreshFromSearch_(old, fresh) {
+  if (fresh.status === 'retry' || /^error/.test(fresh.status)) return old;
+  if (fresh.status === 'not found') return Object.assign({}, old, { at: today_() });
+  if (old.status === 'ok' && fresh.status === 'check name') fresh.status = 'ok'; // you'd approved it
+  return fresh;
+}
+
 function needsLookup_(p, rec) {
   return !rec || /^error/.test(rec.status) || rec.query !== buildQuery_(p).text;
 }
@@ -487,7 +585,7 @@ function today_() { return Utilities.formatDate(new Date(), 'America/Los_Angeles
 // ---------- The "app data" tab ----------
 
 const DATA_HEADERS = ['key', 'Your name', 'Sheet row', 'Status', 'Google name', 'Address',
-  'Locations', 'Cuisine (Google)', 'Open/closed', 'Searched for', 'Looked up', 'data (JSON)'];
+  'Locations', 'Cuisine (Google)', 'Open/closed', 'Searched for', 'Last updated', 'data (JSON)'];
 const STATUS_COLORS = { 'not found': '#f4cccc', 'check name': '#fff2cc', 'skip': '#efefef' };
 
 function readAppData_() {

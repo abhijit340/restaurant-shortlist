@@ -64,8 +64,9 @@ const g = (name, lat, status = 'OPERATIONAL', periods = []) => ({
 
 (async () => {
   const code = await (await fetch('../apps-script/Code.gs')).text();
-  const { parseSheet, buildQuery_, toRecord_, namesMatch_, overallStatus_, needsLookup_, withAppData_, parseMatrix_, parseLatLng_ } =
-    new Function(code + '\nreturn { parseSheet, buildQuery_, toRecord_, namesMatch_, overallStatus_, needsLookup_, withAppData_, parseMatrix_, parseLatLng_ };')();
+  const { parseSheet, buildQuery_, toRecord_, namesMatch_, overallStatus_, needsLookup_, withAppData_, parseMatrix_, parseLatLng_,
+    pickStale_, refreshFromDetails_, refreshFromSearch_ } =
+    new Function(code + '\nreturn { parseSheet, buildQuery_, toRecord_, namesMatch_, overallStatus_, needsLookup_, withAppData_, parseMatrix_, parseLatLng_, pickStale_, refreshFromDetails_, refreshFromSearch_ };')();
   const places = parseSheet(SYNTHETIC);
   const find = (k) => places.find(p => p.key === k);
 
@@ -141,6 +142,30 @@ const g = (name, lat, status = 'OPERATIONAL', periods = []) => ({
     ]), 3)) === '[2,13,null]'],
     ['matrix: first destination has no index field', parseMatrix_(200, '[{"duration":"60s","condition":"ROUTE_EXISTS"}]', 1)[0] === 1],
     ['matrix: HTTP error → all null', JSON.stringify(parseMatrix_(403, 'denied', 2)) === '[null,null]'],
+  );
+
+  // ----- Monthly refresh -----
+  const loc1 = chain.locs[0];
+  const R = (key, at, status = 'ok', locs = [loc1]) => ({ key, name: key, at, status, locs, query: key });
+  const recs = new Map([
+    ['a', R('a', '2026-08-01')], ['b', R('b', '2026-09-20')], ['c', R('c', '2026-07-15', 'check name')],
+    ['d', R('d', '2026-06-01', 'skip')], ['e', R('e', '2026-06-01', 'not found', [])], ['f', R('f', 'garbage')],
+  ]);
+  const order = [...'abcdef'].map(k => P(k));
+  const due = pickStale_(order, recs, new Date('2026-10-01'), 28, 10).map(r => r.key);
+  const fresh = refreshFromDetails_(R('a', '2026-08-01', 'ok'), 200, JSON.stringify(g('Echo Eatery', 47.7)));
+  const kept = refreshFromSearch_(R('ch', '2026-08-01', 'ok'), { status: 'check name', locs: [loc1], at: '2026-09-30' });
+
+  checks.push(
+    ['refresh: oldest first, unreadable date first', JSON.stringify(due) === '["f","c","a"]'],
+    ['refresh: skips skip / not found / recent', !due.includes('d') && !due.includes('e') && !due.includes('b')],
+    ['refresh: limit respected', pickStale_(order, recs, new Date('2026-10-01'), 28, 2).length === 2],
+    ['refresh: force mode (age 0) includes recent', pickStale_(order, recs, new Date('2026-10-01'), 0, 10).some(r => r.key === 'b')],
+    ['details: new data, status kept, date updated', fresh.status === 'ok' && fresh.locs[0].lat === 47.7 && fresh.at === '2026-09-30'],
+    ['details: retired ID → error (search again)', refreshFromDetails_(R('a', 'x'), 404, '').status === 'error 404'],
+    ['details: other error → unchanged', refreshFromDetails_(R('a', '2026-08-01'), 500, '').at === '2026-08-01'],
+    ['chain: your "ok" survives a re-search', kept.status === 'ok'],
+    ['chain: failed search keeps old data', refreshFromSearch_(R('ch', '2026-08-01'), { status: 'error 500' }).at === '2026-08-01'],
   );
   const ul = document.getElementById('checks');
   for (const [label, ok] of checks) {
