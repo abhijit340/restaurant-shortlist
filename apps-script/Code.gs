@@ -31,7 +31,8 @@ function doGet(e) {
   const key = PropertiesService.getScriptProperties().getProperty('KEY');
   if (!key || !e || e.parameter.key !== key) return json_({ error: 'bad-key' });
   try {
-    if (e.parameter.action === 'times') return json_(travelTimes_(e.parameter.from, e.parameter.to));
+    if (e.parameter.action === 'times') return json_(travelTimes_(e.parameter.from, e.parameter.to, e.parameter.when));
+    if (e.parameter.action === 'geocode') return json_(geocode_(e.parameter.q));
     return json_({ places: withAppData_(readSourcePlaces_(), readAppData_()), loadedAt: new Date().toISOString() });
   } catch (err) {
     return json_({ error: String(err) });
@@ -234,10 +235,12 @@ function notify_(msg) {
 const MAX_DESTINATIONS = 20; // the app sends ~15; this caps the cost of any one request
 
 /**
- * from = "lat,lng"; to = "lat,lng|lat,lng|…". Returns { walk: [minutes|null…], transit: [...] }
- * in the same order as `to`. Walking and transit are fetched in parallel.
+ * from = "lat,lng"; to = "lat,lng|lat,lng|…"; when = optional departure time
+ * (milliseconds since 1970) for planning ahead, so transit uses that time's schedule.
+ * Returns { walk: [minutes|null…], transit: [...] } in the same order as `to`.
+ * Walking and transit are fetched in parallel.
  */
-function travelTimes_(from, to) {
+function travelTimes_(from, to, when) {
   const origin = parseLatLng_(from);
   const dests = String(to || '').split('|').filter(Boolean).map(parseLatLng_);
   if (!origin || !dests.length || dests.length > MAX_DESTINATIONS || dests.some(d => !d)) {
@@ -249,7 +252,8 @@ function travelTimes_(from, to) {
   if (!spend_('matrixTransit', dests.length)) return { error: 'monthly-limit' };
   if (!spend_('matrixWalk', dests.length)) return { error: 'monthly-limit' };
 
-  const [walk, transit] = UrlFetchApp.fetchAll(['WALK', 'TRANSIT'].map(mode => matrixRequest_(origin, dests, mode, apiKey)))
+  const depart = departureTime_(when, new Date());
+  const [walk, transit] = UrlFetchApp.fetchAll(['WALK', 'TRANSIT'].map(mode => matrixRequest_(origin, dests, mode, apiKey, depart)))
     .map(res => parseMatrix_(res.getResponseCode(), res.getContentText(), dests.length));
   return { walk, transit };
 }
@@ -259,16 +263,50 @@ function parseLatLng_(s) {
   return m ? { latitude: Number(m[1]), longitude: Number(m[2]) } : null;
 }
 
-function matrixRequest_(origin, dests, mode, apiKey) {
+/** A planned departure as an ISO time, or null for "now" (also for past or far-off times). */
+function departureTime_(when, now) {
+  const t = Number(when);
+  if (!t || t < now.getTime() + 60000 || t > now.getTime() + 90 * 86400000) return null;
+  return new Date(t).toISOString();
+}
+
+function matrixRequest_(origin, dests, mode, apiKey, depart) {
   const point = (ll) => ({ waypoint: { location: { latLng: ll } } });
+  const body = { origins: [point(origin)], destinations: dests.map(point), travelMode: mode };
+  if (depart && mode === 'TRANSIT') body.departureTime = depart; // walking doesn't depend on the time
   return {
     url: 'https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix',
     method: 'post',
     contentType: 'application/json',
     muteHttpExceptions: true,
     headers: { 'X-Goog-Api-Key': apiKey, 'X-Goog-FieldMask': 'originIndex,destinationIndex,duration,condition' },
-    payload: JSON.stringify({ origins: [point(origin)], destinations: dests.map(point), travelMode: mode }),
+    payload: JSON.stringify(body),
   };
+}
+
+// ---------- "Near a place": turn typed text into a location ----------
+
+/** q = "Capitol Hill" or an address. Returns { lat, lng, label } or { error }. */
+function geocode_(q) {
+  q = String(q || '').trim().slice(0, 200);
+  if (!q) return { error: 'bad-request' };
+  const apiKey = PropertiesService.getScriptProperties().getProperty('MAPS_KEY');
+  if (!apiKey) return { error: 'MAPS_KEY is missing from Script Properties.' };
+  if (!spend_('geocode', 1)) return { error: 'monthly-limit' };
+  // "bounds" makes Google prefer matches around Puget Sound ("Capitol Hill" → Seattle's).
+  const url = 'https://maps.googleapis.com/maps/api/geocode/json?address=' + encodeURIComponent(q) +
+    '&bounds=47.2,-122.7%7C48.0,-121.9&region=us&key=' + apiKey;
+  const res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+  return parseGeocode_(res.getResponseCode(), res.getContentText());
+}
+
+function parseGeocode_(code, body) {
+  if (code !== 200) return { error: 'geocode failed (' + code + ')' };
+  const data = JSON.parse(body);
+  if (data.status === 'ZERO_RESULTS') return { error: 'not-found' };
+  if (data.status !== 'OK' || !data.results.length) return { error: 'geocode ' + data.status };
+  const r = data.results[0];
+  return { lat: r.geometry.location.lat, lng: r.geometry.location.lng, label: r.formatted_address };
 }
 
 /** Google's answer → minutes per destination (null where no route or an error). Pure, testable. */

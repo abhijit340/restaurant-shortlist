@@ -65,8 +65,8 @@ const g = (name, lat, status = 'OPERATIONAL', periods = []) => ({
 (async () => {
   const code = await (await fetch('../apps-script/Code.gs')).text();
   const { parseSheet, buildQuery_, toRecord_, namesMatch_, overallStatus_, needsLookup_, withAppData_, parseMatrix_, parseLatLng_,
-    pickStale_, refreshFromDetails_, refreshFromSearch_ } =
-    new Function(code + '\nreturn { parseSheet, buildQuery_, toRecord_, namesMatch_, overallStatus_, needsLookup_, withAppData_, parseMatrix_, parseLatLng_, pickStale_, refreshFromDetails_, refreshFromSearch_ };')();
+    pickStale_, refreshFromDetails_, refreshFromSearch_, departureTime_, matrixRequest_, parseGeocode_ } =
+    new Function(code + '\nreturn { parseSheet, buildQuery_, toRecord_, namesMatch_, overallStatus_, needsLookup_, withAppData_, parseMatrix_, parseLatLng_, pickStale_, refreshFromDetails_, refreshFromSearch_, departureTime_, matrixRequest_, parseGeocode_ };')();
   const places = parseSheet(SYNTHETIC);
   const find = (k) => places.find(p => p.key === k);
 
@@ -167,6 +167,22 @@ const g = (name, lat, status = 'OPERATIONAL', periods = []) => ({
     ['chain: your "ok" survives a re-search', kept.status === 'ok'],
     ['chain: failed search keeps old data', refreshFromSearch_(R('ch', '2026-08-01'), { status: 'error 500' }).at === '2026-08-01'],
   );
+  // ----- Planning ahead -----
+  const clockNow = new Date('2026-10-02T20:30:00Z');
+  const inTwoHours = clockNow.getTime() + 2 * 3600000;
+  const ll = { latitude: 47.6, longitude: -122.3 };
+  const body = (mode, depart) => JSON.parse(matrixRequest_(ll, [ll], mode, 'k', depart).payload);
+  const geo = (status, results = []) => parseGeocode_(200, JSON.stringify({ status, results }));
+  checks.push(
+    ['plan: future time → ISO departure', departureTime_(String(inTwoHours), clockNow) === '2026-10-02T22:30:00.000Z'],
+    ['plan: no time / past / garbage → now', departureTime_(undefined, clockNow) === null && departureTime_(clockNow.getTime() - 5000, clockNow) === null && departureTime_('soon', clockNow) === null],
+    ['plan: more than 90 days out → now', departureTime_(clockNow.getTime() + 100 * 86400000, clockNow) === null],
+    ['plan: departure time sent for transit only', body('TRANSIT', 'X').departureTime === 'X' && !('departureTime' in body('WALK', 'X')) && !('departureTime' in body('TRANSIT', null))],
+    ['geocode: first result → lat/lng/label', JSON.stringify(geo('OK', [{ formatted_address: 'Somewhere, Seattle', geometry: { location: { lat: 47.62, lng: -122.32 } } }])) === '{"lat":47.62,"lng":-122.32,"label":"Somewhere, Seattle"}'],
+    ['geocode: nothing found', geo('ZERO_RESULTS').error === 'not-found'],
+    ['geocode: Google error passed on', geo('REQUEST_DENIED').error === 'geocode REQUEST_DENIED' && parseGeocode_(500, '').error === 'geocode failed (500)'],
+  );
+
   // ----- Deals reader (deals.js), with made-up wording -----
   await new Promise((ok, fail) => { const s = document.createElement('script'); s.src = '../deals.js'; s.onload = ok; s.onerror = fail; document.head.append(s); });
   const D = (text) => Deals.parseDeals(text).windows.map(Deals.describeWindow).join('; ');

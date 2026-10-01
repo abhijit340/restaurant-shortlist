@@ -52,7 +52,11 @@ class Handler(SimpleHTTPRequestHandler):
             body = {"error": "bad-key"}
         elif params.get("action") == ["times"]:
             body = fake_times(params)
-            print(f"  times for {len(body['walk'])} destinations")
+        elif params.get("action") == ["geocode"]:
+            # Any text "finds" a fixed spot on Capitol Hill, except "nowhere".
+            q = params.get("q", [""])[0]
+            body = ({"error": "not-found"} if q.lower() == "nowhere"
+                    else {"lat": 47.6205, "lng": -122.3212, "label": f"{q.title()}, Seattle, WA, USA"})
         else:
             body = json.loads((ROOT / "tests" / "mock_exec.json").read_text(encoding="utf-8"))
         data = json.dumps(body).encode()

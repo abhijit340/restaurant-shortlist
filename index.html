@@ -61,6 +61,9 @@
     }
     .toggle[aria-pressed="true"] { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
     .row select { width: auto; padding: 8px 12px; font-size: .9rem; border-radius: 999px; }
+    .plan-toggle { text-align: left; border-radius: 12px; padding: 10px 12px; }
+    .plan-toggle.planned { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+    #plan-form { margin-top: 0; }
 
     /* Place cards: the whole card opens the place in Google Maps (a "stretched" link);
        other links on the card sit above it. */
@@ -113,6 +116,20 @@
   </form>
 
   <div id="controls" hidden>
+    <!-- Where and when: current location and now by default; or plan ahead. -->
+    <button class="toggle plan-toggle" id="plan-toggle" aria-expanded="false">📍 Near me · now</button>
+    <form class="card" id="plan-form" hidden>
+      <label for="plan-place">Starting from</label>
+      <input id="plan-place" placeholder="Capitol Hill, an address… (blank = where I am)" autocomplete="off">
+      <label for="plan-when">Being there at</label>
+      <input id="plan-when" type="datetime-local">
+      <p class="hint">Leave blank for right now.</p>
+      <p class="error" id="plan-error" hidden></p>
+      <div class="row" style="margin-top:12px; align-items:center">
+        <button>Show places</button>
+        <button type="button" class="link" id="plan-reset">Back to here and now</button>
+      </div>
+    </form>
     <input id="q" type="search" placeholder="Search: sushi, brunch, ballard…" autocomplete="off">
     <div class="row">
       <button class="toggle" data-section="all" aria-pressed="true">All</button>
@@ -141,7 +158,7 @@
   <button id="more" hidden>Show more</button>
 
   <footer>
-    v0.10<span id="reconnect" hidden> · <button class="link">Change Sheet connection</button></span>
+    v0.11<span id="reconnect" hidden> · <button class="link">Change Sheet connection</button></span>
   </footer>
 </main>
 
@@ -160,12 +177,16 @@
 
   // For testing on a computer: ?at=47.61,-122.33 fakes your location, ?now=2026-10-02T21:30 fakes the clock.
   const params = new URLSearchParams(location.search);
-  const now = () => (params.get("now") ? new Date(params.get("now")) : new Date());
+  const realNow = () => (params.get("now") ? new Date(params.get("now")) : new Date());
+  // "Now" for everything time-related: the planned time when planning ahead.
+  const now = () => (state.plan.when ? new Date(state.plan.when) : realNow());
 
   const state = {
     places: [],
-    here: null,        // { lat, lng, acc } once we know where you are
+    here: null,        // { lat, lng, acc } once we know where you are (or the planned start)
     hereError: "",
+    plan: { place: null, when: null },  // place: { query, label, lat, lng }; when: ms. null = here / now
+    geocoded: {},                       // typed places already looked up this session
     filters: { q: "", section: "all", fav: false, deals: false, tag: "", open: false, max: 0 },
     shown: PAGE,
     times: { origin: null, at: 0, byKey: {} },  // travel times, keyed by place
@@ -196,10 +217,15 @@
       // Google returns a sign-in web page instead of JSON when access isn't "Anyone".
       throw new Error("The Sheet's script didn't answer properly. In Apps Script, check the deployment's \"Who has access\" is set to Anyone.");
     }
-    if (data.error === "bad-key") throw new Error("The key doesn't match. Re-run showAppSetup and copy the key again.");
-    if (data.error === "monthly-limit") throw new Error("This month's free travel-time allowance is used up, so distances are straight-line until next month.");
-    if (data.error) throw new Error("The Sheet's script had a problem: " + data.error);
-    return data;
+    if (!data.error) return data;
+    const messages = {
+      "bad-key": "The key doesn't match. Re-run showAppSetup and copy the key again.",
+      "monthly-limit": "This month's free Google allowance for that is used up; it resets next month.",
+      "not-found": "Couldn't find that place. Try adding a street, neighborhood, or city.",
+    };
+    const err = new Error(messages[data.error] || "The Sheet's script had a problem: " + data.error);
+    err.code = data.error;
+    throw err;
   }
 
   const LOCATION_ERRORS = {
@@ -209,6 +235,8 @@
   };
 
   function locate() {
+    const planned = state.plan.place;
+    if (planned) return Promise.resolve({ lat: planned.lat, lng: planned.lng, acc: 0 });
     const at = params.get("at");
     if (at) {
       const [lat, lng] = at.split(",").map(Number);
@@ -256,17 +284,27 @@
     }
     state.shown = PAGE;
     fillTagOptions();
+    updatePlanUI();
     $("controls").hidden = false;
     render();
   }
 
   // ---------- Travel times ----------
 
-  /** Saved times are reused while you stay within 200 m for 10 minutes; otherwise start fresh. */
+  /**
+   * Saved times are reused while you stay within 200 m for 10 minutes (or, when
+   * planning ahead, for the same start and planned time); otherwise start fresh.
+   */
   function timesFor(here) {
-    const t = state.times;
-    const fresh = t.origin && miles(t.origin, here) * 1609 < REUSE_METERS && Date.now() - t.at < REUSE_MS;
-    if (!fresh) state.times = { origin: { lat: here.lat, lng: here.lng }, at: Date.now(), byKey: {} };
+    const when = state.plan.when || null;
+    const fits = (t) => t && t.origin && miles(t.origin, here) * 1609 < REUSE_METERS &&
+      (when ? t.when === when : !t.when && Date.now() - t.at < REUSE_MS);
+    if (fits(state.times)) return state.times;
+    // One previous set is kept aside, so flipping between a plan and "here and now"
+    // doesn't fetch the same times again.
+    const aside = state.timesAside;
+    state.timesAside = state.times;
+    state.times = fits(aside) ? aside : { origin: { lat: here.lat, lng: here.lng }, at: Date.now(), when, byKey: {} };
     return state.times;
   }
 
@@ -293,7 +331,8 @@
     const ll = (pt) => `${pt.lat.toFixed(5)},${pt.lng.toFixed(5)}`;
     try {
       const data = await callScript(cfg,
-        `&action=times&from=${ll(times.origin)}&to=${need.map((x) => ll(x.near.loc)).join("|")}`);
+        `&action=times&from=${ll(times.origin)}&to=${need.map((x) => ll(x.near.loc)).join("|")}` +
+        (times.when ? `&when=${times.when}` : ""));
       need.forEach((x, i) => { times.byKey[x.p.key] = { walk: data.walk[i], transit: data.transit[i] }; });
       saveJSON(TIMES_KEY, state.times);
     } catch (err) {
@@ -530,13 +569,13 @@
       const closes = clock(new Date(arrive.getTime() + h.closesIn * 60000));
       const left = duration(h.closesIn);
       if (h.closesIn < SHORT_STAY) {
-        return el("p", "hours-warn", `⚠️ Closes ${closes} · ${isArrival ? `you'd have only ${left}` : `in ${left}`}`);
+        return el("p", "hours-warn", `⚠️ Closes ${closes} · ${isArrival ? `you'd have only ${left}` : state.plan.when ? `${left} later` : `in ${left}`}`);
       }
       return el("p", "meta", `🕒 Open till ${closes}` + (isArrival ? ` · you'd have ${left}` : ""));
     }
     const opens = new Date(arrive.getTime() + h.opensIn * 60000);
     const otherDay = opens.toDateString() !== arrive.toDateString();
-    return el("p", "hours-closed", `🔴 Closed ${isArrival ? "when you'd arrive" : "now"} · opens ${clock(opens, otherDay)}`);
+    return el("p", "hours-closed", `🔴 Closed ${isArrival ? "when you'd arrive" : state.plan.when ? "then" : "now"} · opens ${clock(opens, otherDay)}`);
   }
 
   /**
@@ -546,11 +585,11 @@
    */
   function dealLine(d, arrive, isArrival) {
     const at = (min) => clock(new Date(arrive.getTime() + min * 60000));
-    if (d.kind === "special") return el("p", "deal-on", "🏷 Special today");
+    if (d.kind === "special") return el("p", "deal-on", state.plan.when ? "🏷 Special that day" : "🏷 Special today");
     if (d.status === "now") {
-      return el("p", "deal-on", `🍹 Happy hour ${isArrival ? "on when you'd arrive" : "now"} · until ${at(d.endsIn)}`);
+      return el("p", "deal-on", `🍹 Happy hour ${isArrival ? "on when you'd arrive" : state.plan.when ? "on then" : "now"} · until ${at(d.endsIn)}`);
     }
-    return el("p", "deal-on", `🍹 Happy hour from ${at(d.startsIn)} · ${d.startsIn} min ${isArrival ? "after you'd arrive" : "from now"}`);
+    return el("p", "deal-on", `🍹 Happy hour from ${at(d.startsIn)} · ${d.startsIn} min ${isArrival ? "after you'd arrive" : state.plan.when ? "later" : "from now"}`);
   }
 
   /**
@@ -646,6 +685,83 @@
     } finally {
       btn.disabled = false;
     }
+  });
+
+  // ---------- Planning ahead: a different start and/or time ----------
+
+  function updatePlanUI() {
+    const { place, when } = state.plan;
+    const where = place ? place.label.split(",").slice(0, 2).join(",") : "Near me";
+    const btn = $("plan-toggle");
+    btn.textContent = `📍 ${where} · ${when ? clock(new Date(when), true) : "now"}`;
+    btn.classList.toggle("planned", Boolean(place || when));
+  }
+
+  // "2026-10-03T19:00" in the phone's own time zone, as the date-time picker wants it.
+  function toLocalInput(d) {
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+
+  function showPlanForm(open) {
+    $("plan-form").hidden = !open;
+    $("plan-toggle").setAttribute("aria-expanded", String(open));
+    if (!open) return;
+    $("plan-error").hidden = true;
+    $("plan-place").value = state.plan.place ? state.plan.place.query : "";
+    $("plan-when").value = state.plan.when ? toLocalInput(new Date(state.plan.when)) : "";
+    $("plan-when").min = toLocalInput(realNow());
+  }
+
+  /** Re-sorts for the current plan (or here and now) without reloading the Sheet. */
+  async function relocate() {
+    updatePlanUI();
+    state.timesError = "";
+    forgetFailedTimes();
+    try {
+      state.here = await locate();
+      state.hereError = "";
+    } catch (err) {
+      state.here = null;
+      state.hereError = err.message;
+    }
+    state.shown = PAGE;
+    render();
+  }
+
+  $("plan-toggle").addEventListener("click", () => showPlanForm($("plan-form").hidden));
+
+  $("plan-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const query = $("plan-place").value.trim();
+    let when = $("plan-when").value ? new Date($("plan-when").value).getTime() : null;
+    if (when && when <= realNow().getTime()) when = null; // a past time just means "now"
+    const btn = e.submitter || e.target.querySelector("button");
+    btn.disabled = true;
+    $("plan-error").hidden = true;
+    try {
+      let place = null;
+      if (query) {
+        // Each typed place is looked up once per session.
+        const known = state.geocoded[query.toLowerCase()];
+        place = known || { query, ...(await callScript(loadJSON(CONFIG_KEY), `&action=geocode&q=${encodeURIComponent(query)}`)) };
+        state.geocoded[query.toLowerCase()] = place;
+      }
+      state.plan = { place, when };
+      showPlanForm(false);
+      await relocate();
+    } catch (err) {
+      $("plan-error").textContent = err.message;
+      $("plan-error").hidden = false;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  $("plan-reset").addEventListener("click", () => {
+    state.plan = { place: null, when: null };
+    showPlanForm(false);
+    relocate();
   });
 
   $("refresh").addEventListener("click", load);
