@@ -167,6 +167,39 @@ const g = (name, lat, status = 'OPERATIONAL', periods = []) => ({
     ['chain: your "ok" survives a re-search', kept.status === 'ok'],
     ['chain: failed search keeps old data', refreshFromSearch_(R('ch', '2026-08-01'), { status: 'error 500' }).at === '2026-08-01'],
   );
+  // ----- Deals reader (deals.js), with made-up wording -----
+  await new Promise((ok, fail) => { const s = document.createElement('script'); s.src = '../deals.js'; s.onload = ok; s.onerror = fail; document.head.append(s); });
+  const D = (text) => Deals.parseDeals(text).windows.map(Deals.describeWindow).join('; ');
+  const at = (text, iso, closesIn = null) => Deals.dealAt(Deals.parseDeals(text).windows, new Date(iso), closesIn);
+  // 2026-10-02 is a Friday; 2026-10-03 Saturday; 2026-10-04 Sunday.
+  checks.push(
+    ['deals: days + PM times', D('hh tu-th 3-4:45') === 'Tue–Thu 3 PM–4:45 PM'],
+    ['deals: no days = daily, two windows', D('specials 2-3, 7-8') === 'Daily 2 PM–3 PM; Daily 7 PM–8 PM'],
+    ['deals: times-only clause inherits days', D('hh sat-sun 1-2, 6-7') === 'Sat–Sun 1 PM–2 PM; Sat–Sun 6 PM–7 PM'],
+    ['deals: days, then times in next clause', D('wed-fri, 5-6 (bar only)') === 'Wed–Fri 5 PM–6 PM'],
+    ['deals: week wrap (fri-mon)', D('hh fri-mon 2-3') === 'Fri–Mon 2 PM–3 PM'],
+    ['deals: run-together days (mwf)', D('hh mwf 4-5') === 'Mon, Wed, Fri 4 PM–5 PM'],
+    ['deals: noon start', D('hh 12-3') === 'Daily 12 PM–3 PM'],
+    ['deals: late night to midnight', D('late hh 11-12') === 'Daily 11 PM–midnight'],
+    ['deals: "-close"', D('daily 10-close') === 'Daily 10 PM–close'],
+    ['deals: "after 9pm"', D('$3 slices after 9pm') === 'Daily 9 PM–close'],
+    ['deals: "until 5"', D('happy hour until 5') === 'Daily until 5 PM'],
+    ['deals: day-only special', D('$1 tacos tuesdays') === 'Tue (special, all day)'],
+    ['deals: prices are not times', D('$2 beers, $8 wine') === ''],
+    ['deals: "all day" on a day', D('hh all day sunday') === 'Sun all day'],
+    ['deals: Sheets date turned back into 4-7', D('2025-04-07 00:00:00') === 'Daily 4 PM–7 PM' && D('4/7/2025') === 'Daily 4 PM–7 PM'],
+    ['deals: "happy hour" without times is vague', Deals.parseDeals('happy hour!').vagueHH && !Deals.parseDeals('happy hour!').understood],
+    ['deal on at arrival', at('hh daily 4-6', '2026-10-02T17:00').status === 'now'],
+    ['deal needs 10+ min left', at('hh daily 4-6', '2026-10-02T17:55') === null],
+    ['deal starting within 30 min = soon', at('hh daily 4-6', '2026-10-02T15:35').status === 'soon'],
+    ['deal starting in 31+ min = nothing', at('hh daily 4-6', '2026-10-02T15:29') === null],
+    ['wrong day = nothing', at('hh mon-thu 4-6', '2026-10-02T17:00') === null],
+    ['"-close" uses closing time', at('hh 10-close', '2026-10-02T22:30', 30).endsIn === 30],
+    ['Saturday-night window still on after midnight', at('hh sat 10-2', '2026-10-04T00:30').status === 'now'],
+    ['special counts all day on its day', at('$1 tacos fridays', '2026-10-02T12:00').kind === 'special'],
+    ['happy hour beats special', at('$1 tacos fridays; hh 4-6', '2026-10-02T17:00').kind === 'hh'],
+  );
+
   const ul = document.getElementById('checks');
   for (const [label, ok] of checks) {
     const li = document.createElement('li');

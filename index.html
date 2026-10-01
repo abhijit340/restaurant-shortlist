@@ -78,6 +78,7 @@
     .meta b { color: var(--text); font-weight: 600; }
     .hours-warn { color: var(--warn); font-size: .9rem; font-weight: 600; }
     .hours-closed { color: var(--error); font-size: .9rem; font-weight: 600; }
+    .deal-on { color: var(--accent); font-size: .9rem; font-weight: 600; }
     .place.dim { opacity: .7; }
     .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
     .chip { font-size: .78rem; padding: 2px 8px; border-radius: 999px; background: var(--chip); }
@@ -140,10 +141,11 @@
   <button id="more" hidden>Show more</button>
 
   <footer>
-    v0.8<span id="reconnect" hidden> · <button class="link">Change Sheet connection</button></span>
+    v0.9<span id="reconnect" hidden> · <button class="link">Change Sheet connection</button></span>
   </footer>
 </main>
 
+<script src="deals.js"></script>
 <script>
   const $ = (id) => document.getElementById(id);
   const CONFIG_KEY = "nearbyeats.config";
@@ -248,6 +250,7 @@
       return;
     }
     state.places = data.value.places;
+    for (const p of state.places) p.dealWindows = Deals.parseDeals(p.deals).windows;
     state.shown = PAGE;
     fillTagOptions();
     $("controls").hidden = false;
@@ -411,6 +414,10 @@
       const tempClosed = x.p.closed === "closed temporarily";
       x.hours = x.near && !tempClosed ? openInfo(x.near.loc.hours, x.arrive) : null;
       x.closedOnArrival = tempClosed || (x.hours ? !x.hours.open : false);
+      // Happy hour (or a day's special) running when you'd arrive, or starting within 30 min.
+      x.deal = !x.closedOnArrival && x.p.dealWindows.length
+        ? Deals.dealAt(x.p.dealWindows, x.arrive, x.hours && x.hours.open ? x.hours.closesIn : null)
+        : null;
     }
 
     // 4. Time-based filters.
@@ -418,11 +425,13 @@
     if (f.open) list = list.filter((x) => !x.closedOnArrival);
     if (f.max) list = list.filter((x) => x.trip && x.trip.fastest <= f.max);
 
-    // 5. Places with travel times first (shortest transit first), then the rest by distance;
-    //    within each, places closed when you'd arrive go last.
+    // 5. Places with travel times first (shortest transit first), then the rest by distance.
+    //    Within each: deals on (or starting soon) when you'd arrive jump to the top;
+    //    places closed when you'd arrive go last.
     list.sort((a, b) =>
       (a.trip ? 0 : 1) - (b.trip ? 0 : 1) ||
       a.closedOnArrival - b.closedOnArrival ||
+      (a.deal ? 0 : 1) - (b.deal ? 0 : 1) ||
       (a.trip && b.trip ? a.trip.min - b.trip.min : 0));
     state.lastCount = list.length;
     updateStatus();
@@ -457,7 +466,7 @@
     $("error").hidden = !problem;
   }
 
-  function card({ p, near, trip, hours, arrive }) {
+  function card({ p, near, trip, hours, arrive, deal }) {
     const c = el("article", "card place" + ((hours && !hours.open) || p.closed === "closed temporarily" ? " dim" : ""));
     const top = el("div", "top");
     const h2 = el("h2");
@@ -484,6 +493,7 @@
 
     // Hours on arrival (or now, for places without a travel time).
     if (hours) c.append(hoursLine(hours, arrive, Boolean(trip)));
+    if (deal) c.append(dealLine(deal, arrive, Boolean(trip)));
 
     // Neighborhood, chain size, and the menu link (which sits above the card-wide Maps link).
     const where = el("p", "meta", "📍 " + (p.hood || (near ? near.loc.addr : "") || "No location yet"));
@@ -521,6 +531,20 @@
     const opens = new Date(arrive.getTime() + h.opensIn * 60000);
     const otherDay = opens.toDateString() !== arrive.toDateString();
     return el("p", "hours-closed", `🔴 Closed ${isArrival ? "when you'd arrive" : "now"} · opens ${clock(opens, otherDay)}`);
+  }
+
+  /**
+   * "🍹 Happy hour on when you'd arrive · until 6:00 PM"
+   * "🍹 Happy hour from 5:00 PM · 10 min after you'd arrive"
+   * "🏷 Special today" (the deals line below says what it is)
+   */
+  function dealLine(d, arrive, isArrival) {
+    const at = (min) => clock(new Date(arrive.getTime() + min * 60000));
+    if (d.kind === "special") return el("p", "deal-on", "🏷 Special today");
+    if (d.status === "now") {
+      return el("p", "deal-on", `🍹 Happy hour ${isArrival ? "on when you'd arrive" : "now"} · until ${at(d.endsIn)}`);
+    }
+    return el("p", "deal-on", `🍹 Happy hour from ${at(d.startsIn)} · ${d.startsIn} min ${isArrival ? "after you'd arrive" : "from now"}`);
   }
 
   /**
