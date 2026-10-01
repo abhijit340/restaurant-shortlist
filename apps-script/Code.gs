@@ -97,6 +97,7 @@ function fillMissing() {
 
     places = readSourcePlaces_();
     data = readAppData_();
+    recheckNames_(data);
     const todo = places.filter(p => needsLookup_(p, data.get(p.key)));
     remaining = todo.length;
 
@@ -342,12 +343,45 @@ function nameTokens_(s) {
   return normKey_(s || '').split(' ').filter(t => t.length >= 3 && !GENERIC_WORDS.has(t));
 }
 
-/** True if Google's name shares a distinctive word with ours ("joes" ≈ "Joe's Noodle Shack"). */
+/**
+ * True if Google's name plausibly is ours:
+ *  - Google's name starts with ours, ignoring spaces and punctuation, at a word
+ *    boundary ("zu zu" ≈ "Zu Zu Kitchen", "qaz" ≈ "qa'z Seattle", but "mira" ≠ "Miracle Diner"), or
+ *  - they share a distinctive word ("joes" ≈ "Joe's Noodle Shack"), allowing one typo
+ *    ("bellatrixa" ≈ "Belatrixa").
+ */
 function namesMatch_(ours, theirs) {
+  const compact = normKey_(ours).replace(/ /g, '');
+  let prefix = '';
+  for (const word of normKey_(theirs || '').split(' ')) {
+    prefix += word;
+    if (prefix === compact) return true;
+    if (prefix.length >= compact.length) break;
+  }
   const a = nameTokens_(ours);
   const b = nameTokens_(theirs);
-  if (!a.length) return normKey_(ours) === normKey_(theirs || '');
-  return a.some(t => b.some(u => u.startsWith(t) || t.startsWith(u)));
+  return a.some(t => b.some(u => wordsMatch_(t, u)));
+}
+
+/** "harry" ≈ "harrys", "tacos" ≈ "taco", one typo allowed; but "mira" ≠ "miracle". */
+function wordsMatch_(t, u) {
+  const [short, long] = t.length <= u.length ? [t, u] : [u, t];
+  if (long.startsWith(short) && long.length - short.length <= 2) return true;
+  return long.length >= 4 && withinOneEdit_(short, long);
+}
+
+/** True if two words differ by at most one inserted, deleted, or changed letter. */
+function withinOneEdit_(s, t) {
+  if (Math.abs(s.length - t.length) > 1) return false;
+  let i = 0, j = 0, edits = 0;
+  while (i < s.length && j < t.length) {
+    if (s[i] === t[j]) { i++; j++; continue; }
+    if (++edits > 1) return false;
+    if (s.length > t.length) i++;
+    else if (t.length > s.length) j++;
+    else { i++; j++; }
+  }
+  return edits + (s.length - i) + (t.length - j) <= 1;
 }
 
 function overallStatus_(locs) {
@@ -361,11 +395,30 @@ function needsLookup_(p, rec) {
   return !rec || /^error/.test(rec.status) || rec.query !== buildQuery_(p).text;
 }
 
+/**
+ * Statuses you can type into the "app data" tab yourself:
+ *  ok   = the Google match is right (stop flagging it)
+ *  skip = not a single place (a restaurant group, a roaming food truck): no location in the app
+ */
+const MANUAL_STATUSES = ['ok', 'skip'];
+
+/** Free re-check of yellow rows with the current matching rules (no Google calls). */
+function recheckNames_(data) {
+  let upgraded = 0;
+  data.forEach(r => {
+    if (r.status === 'check name' && r.locs[0] && namesMatch_(r.name, r.locs[0].name)) {
+      r.status = 'ok';
+      upgraded++;
+    }
+  });
+  return upgraded;
+}
+
 /** Adds Google data to each place for the app (closed locations dropped). */
 function withAppData_(places, data) {
   return places.map(p => {
     const rec = data.get(p.key);
-    const locs = rec ? rec.locs : [];
+    const locs = rec && rec.status !== 'skip' ? rec.locs : [];
     return Object.assign(p, {
       cuisine: locs[0] ? locs[0].cuisine : '',
       closed: overallStatus_(locs),
@@ -381,7 +434,7 @@ function today_() { return Utilities.formatDate(new Date(), 'America/Los_Angeles
 
 const DATA_HEADERS = ['key', 'Your name', 'Sheet row', 'Status', 'Google name', 'Address',
   'Locations', 'Cuisine (Google)', 'Open/closed', 'Searched for', 'Looked up', 'data (JSON)'];
-const STATUS_COLORS = { 'not found': '#f4cccc', 'check name': '#fff2cc' };
+const STATUS_COLORS = { 'not found': '#f4cccc', 'check name': '#fff2cc', 'skip': '#efefef' };
 
 function readAppData_() {
   const map = new Map();
@@ -392,7 +445,10 @@ function readAppData_() {
     if (!r[0]) continue;
     let locs = [];
     try { locs = JSON.parse(r[11] || '[]'); } catch (e) { /* hand-edited cell; look it up again */ }
-    map.set(r[0], { key: r[0], name: r[1], row: r[2], status: r[3], query: r[9], at: r[10], locs });
+    // Accept hand-typed statuses in any case ("OK", " Skip").
+    const typed = String(r[3]).trim().toLowerCase();
+    const status = MANUAL_STATUSES.includes(typed) ? typed : r[3];
+    map.set(r[0], { key: r[0], name: r[1], row: r[2], status, query: r[9], at: r[10], locs });
   }
   return map;
 }

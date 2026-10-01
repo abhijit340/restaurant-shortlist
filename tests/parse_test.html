@@ -123,6 +123,14 @@ const g = (name, lat, status = 'OPERATIONAL', periods = []) => ({
     ['lookup redone: neighborhood edited', needsLookup_(P('Alpha Diner', 'fremont'), stored)],
     ['lookup redone: previous error', needsLookup_(P('Alpha Diner', 'capitol hill'), { ...stored, status: 'error 500' })],
     ['app gets only open locations', withAppData_([P('Echo Eatery')], new Map([['echo eatery', chain]]))[0].locs.length === 1],
+    ['app gets no location for "skip"', withAppData_([P('Echo Eatery')], new Map([['echo eatery', { ...chain, status: 'skip' }]]))[0].locs.length === 0],
+    ['match: short name at start ("zu zu")', namesMatch_('zu zu', 'Zu Zu Kitchen Fremont')],
+    ['match: punctuation inside ("qaz")', namesMatch_('qaz', "qa'z Seattle")],
+    ['no match: prefix mid-word ("mira")', !namesMatch_('mira', 'Miracle Mile Diner')],
+    ['match: one typo ("bellatrixa")', namesMatch_('bellatrixa', 'Belatrixa')],
+    ['match: one typo, short word ("gnoma")', namesMatch_('gnoma lao', 'Noma Lhao Shop')],
+    ['no match: two typos', !namesMatch_('quokka', 'Quacker Bar')],
+    ['no match: 3-letter words need exact', !namesMatch_('Pho Ahn', 'Phu Bay')],
   );
   const ul = document.getElementById('checks');
   for (const [label, ok] of checks) {
