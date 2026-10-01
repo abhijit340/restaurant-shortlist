@@ -13,12 +13,14 @@
       --bg: #f6f4ef; --card: #ffffff; --text: #1d1d1b; --muted: #6b6b66;
       --accent: #1f6f5c; --accent-text: #ffffff; --error: #b3261e; --border: #e2dfd7;
       --chip: #ece9e1; --star: #8a5a00; --star-bg: #fbefd5; --fav: #1f6f5c; --fav-bg: #dcefe7;
+      --warn: #8a4b00;
     }
     @media (prefers-color-scheme: dark) {
       :root {
         --bg: #151714; --card: #1f221e; --text: #ecebe6; --muted: #a3a39c;
         --accent: #4fb89c; --accent-text: #0e1a16; --error: #f2b8b5; --border: #33372f;
         --chip: #2c302a; --star: #f3c96b; --star-bg: #3a3020; --fav: #7fd3b8; --fav-bg: #1d3a31;
+        --warn: #f3c96b;
       }
     }
     * { box-sizing: border-box; }
@@ -58,7 +60,7 @@
       background: var(--card); color: var(--text); border: 1px solid var(--border);
     }
     .toggle[aria-pressed="true"] { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
-    #tag { width: auto; padding: 8px 12px; font-size: .9rem; border-radius: 999px; }
+    .row select { width: auto; padding: 8px 12px; font-size: .9rem; border-radius: 999px; }
 
     /* Place cards */
     .place h2 { font-size: 1.05rem; margin: 0; flex: 1; }
@@ -68,6 +70,10 @@
     .place p { margin: 4px 0 0; }
     .meta { color: var(--muted); font-size: .9rem; }
     .meta a { color: inherit; }
+    .meta b { color: var(--text); font-weight: 600; }
+    .hours-warn { color: var(--warn); font-size: .9rem; font-weight: 600; }
+    .hours-closed { color: var(--error); font-size: .9rem; font-weight: 600; }
+    .place.dim { opacity: .7; }
     .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
     .chip { font-size: .78rem; padding: 2px 8px; border-radius: 999px; background: var(--chip); }
     .chip.star { background: var(--star-bg); color: var(--star); }
@@ -108,6 +114,16 @@
       <button class="toggle" data-section="recommend" aria-pressed="false">⭐ Loved</button>
     </div>
     <div class="row">
+      <button class="toggle" data-flag="open" aria-pressed="false">🕒 Open when we'd arrive</button>
+      <select id="max" aria-label="Maximum travel time">
+        <option value="0">Any travel time</option>
+        <option value="15">Within 15 min</option>
+        <option value="20">Within 20 min</option>
+        <option value="30">Within 30 min</option>
+        <option value="45">Within 45 min</option>
+      </select>
+    </div>
+    <div class="row">
       <button class="toggle" data-flag="fav" aria-pressed="false">💚 Favorites</button>
       <button class="toggle" data-flag="deals" aria-pressed="false">🍹 Deals</button>
       <select id="tag" aria-label="Group"><option value="">All groups</option></select>
@@ -119,7 +135,7 @@
   <button id="more" hidden>Show more</button>
 
   <footer>
-    v0.4<span id="reconnect" hidden> · <button class="link">Change Sheet connection</button></span>
+    v0.5<span id="reconnect" hidden> · <button class="link">Change Sheet connection</button></span>
   </footer>
 </main>
 
@@ -127,14 +143,26 @@
   const $ = (id) => document.getElementById(id);
   const CONFIG_KEY = "nearbyeats.config";
   const FILTERS_KEY = "nearbyeats.filters";
-  const PAGE = 40; // cards shown at a time
+  const TIMES_KEY = "nearbyeats.times";
+  const PAGE = 40;                   // cards shown at a time
+  const TIMED = 15;                  // nearest places that get real travel times
+  const REUSE_METERS = 200;          // reuse travel times if you've moved less than this…
+  const REUSE_MS = 10 * 60 * 1000;   // …within this long
+  const SHORT_STAY = 60;             // flag if you'd have less than this many minutes before closing
+
+  // For testing on a computer: ?at=47.61,-122.33 fakes your location, ?now=2026-10-02T21:30 fakes the clock.
+  const params = new URLSearchParams(location.search);
+  const now = () => (params.get("now") ? new Date(params.get("now")) : new Date());
 
   const state = {
     places: [],
     here: null,        // { lat, lng, acc } once we know where you are
     hereError: "",
-    filters: { q: "", section: "all", fav: false, deals: false, tag: "" },
+    filters: { q: "", section: "all", fav: false, deals: false, tag: "", open: false, max: 0 },
     shown: PAGE,
+    times: { origin: null, at: 0, byKey: {} },  // travel times, keyed by place
+    timesLoading: false,
+    timesError: "",
   };
 
   // ---------- Storage (can throw in private mode, so always guarded) ----------
@@ -146,12 +174,12 @@
     try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
   }
 
-  // ---------- Data and location ----------
+  // ---------- Talking to the Sheet's script ----------
 
-  async function fetchPlaces(cfg) {
+  async function callScript(cfg, extra = "") {
     let res;
     try {
-      res = await fetch(`${cfg.url}?key=${encodeURIComponent(cfg.key)}`, { cache: "no-store" });
+      res = await fetch(`${cfg.url}?key=${encodeURIComponent(cfg.key)}${extra}`, { cache: "no-store" });
     } catch {
       throw new Error("Couldn't reach Google. Check your connection and try again.");
     }
@@ -161,6 +189,7 @@
       throw new Error("The Sheet's script didn't answer properly. In Apps Script, check the deployment's \"Who has access\" is set to Anyone.");
     }
     if (data.error === "bad-key") throw new Error("The key doesn't match. Re-run showAppSetup and copy the key again.");
+    if (data.error === "monthly-limit") throw new Error("This month's free travel-time allowance is used up, so distances are straight-line until next month.");
     if (data.error) throw new Error("The Sheet's script had a problem: " + data.error);
     return data;
   }
@@ -172,8 +201,7 @@
   };
 
   function locate() {
-    // For testing on a computer: add ?at=47.61,-122.33 to the address.
-    const at = new URLSearchParams(location.search).get("at");
+    const at = params.get("at");
     if (at) {
       const [lat, lng] = at.split(",").map(Number);
       return Promise.resolve({ lat, lng, acc: 0 });
@@ -199,11 +227,13 @@
     $("status").textContent = "Loading from the Sheet and finding you…";
 
     // Fetch the list and find your location at the same time.
-    const [data, here] = await Promise.allSettled([fetchPlaces(cfg), locate()]);
+    const [data, here] = await Promise.allSettled([callScript(cfg), locate()]);
     $("refresh").disabled = false;
 
     state.here = here.status === "fulfilled" ? here.value : null;
     state.hereError = here.status === "rejected" ? here.reason.message : "";
+    state.timesError = "";
+    forgetFailedTimes();
 
     if (data.status === "rejected") {
       $("status").textContent = "";
@@ -218,6 +248,94 @@
     render();
   }
 
+  // ---------- Travel times ----------
+
+  /** Saved times are reused while you stay within 200 m for 10 minutes; otherwise start fresh. */
+  function timesFor(here) {
+    const t = state.times;
+    const fresh = t.origin && miles(t.origin, here) * 1609 < REUSE_METERS && Date.now() - t.at < REUSE_MS;
+    if (!fresh) state.times = { origin: { lat: here.lat, lng: here.lng }, at: Date.now(), byKey: {} };
+    return state.times;
+  }
+
+  function forgetFailedTimes() {
+    for (const [k, v] of Object.entries(state.times.byKey)) if (v.failed) delete state.times.byKey[k];
+  }
+
+  let timesTimer = null;
+  /** Asks the Sheet's script for walking + transit times to the nearest places that don't have them yet. */
+  function requestTimes(nearest) {
+    clearTimeout(timesTimer);
+    timesTimer = setTimeout(() => fetchTimes(nearest), 600); // wait for typing to settle
+  }
+
+  async function fetchTimes(nearest) {
+    const cfg = loadJSON(CONFIG_KEY);
+    if (!cfg || !state.here || state.timesLoading || state.timesError) return;
+    const times = timesFor(state.here);
+    const need = nearest.filter((x) => !times.byKey[x.p.key]);
+    if (!need.length) return;
+
+    state.timesLoading = true;
+    updateStatus();
+    const ll = (pt) => `${pt.lat.toFixed(5)},${pt.lng.toFixed(5)}`;
+    try {
+      const data = await callScript(cfg,
+        `&action=times&from=${ll(times.origin)}&to=${need.map((x) => ll(x.near.loc)).join("|")}`);
+      need.forEach((x, i) => { times.byKey[x.p.key] = { walk: data.walk[i], transit: data.transit[i] }; });
+      saveJSON(TIMES_KEY, state.times);
+    } catch (err) {
+      state.timesError = err.message;
+      need.forEach((x) => { times.byKey[x.p.key] = { failed: true }; }); // don't retry until Refresh
+    } finally {
+      state.timesLoading = false;
+      render();
+    }
+  }
+
+  /** Fastest way there: { min, mode } or null. */
+  function best(t) {
+    if (!t || t.failed) return null;
+    const options = [["walk", t.walk], ["transit", t.transit]].filter(([, m]) => m != null);
+    if (!options.length) return null;
+    const [mode, min] = options.sort((a, b) => a[1] - b[1])[0];
+    return { mode, min };
+  }
+
+  // ---------- Opening hours ----------
+  // Hours come from Google as [openDay, HHMM, closeDay, HHMM] with 0 = Sunday,
+  // in the restaurant's local time (assumed to match the phone's).
+
+  const WEEK = 7 * 1440;
+  const toMin = (hhmm) => Math.floor(hhmm / 100) * 60 + (hhmm % 100);
+
+  /** At time `when`: { open, closesIn } or { open: false, opensIn } (minutes), or null if hours unknown. */
+  function openInfo(hours, when) {
+    if (!hours || !hours.length) return null;
+    const t = when.getDay() * 1440 + when.getHours() * 60 + when.getMinutes();
+    let opensIn = Infinity;
+    for (const h of hours) {
+      if (h.length < 4) return { open: true, closesIn: Infinity }; // open 24/7 (no closing time)
+      const start = h[0] * 1440 + toMin(h[1]);
+      let end = h[2] * 1440 + toMin(h[3]);
+      if (end <= start) end += WEEK; // e.g. Saturday 6 PM → Sunday 1 AM
+      for (const tt of [t, t + WEEK]) {
+        if (tt >= start && tt < end) return { open: true, closesIn: end - tt };
+      }
+      opensIn = Math.min(opensIn, (start - t + WEEK) % WEEK);
+    }
+    return { open: false, opensIn };
+  }
+
+  function clock(date, withDay = false) {
+    const time = date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    return withDay ? `${date.toLocaleDateString([], { weekday: "short" })} ${time}` : time;
+  }
+
+  function duration(min) {
+    return min < 60 ? `${min} min` : `${Math.floor(min / 60)} h ${String(min % 60).padStart(2, "0")} min`;
+  }
+
   // ---------- Distance ----------
 
   /** Straight-line distance in miles (haversine). */
@@ -230,12 +348,12 @@
 
   /** For chains, the closest open location wins. */
   function nearest(p, here) {
-    let best = null;
+    let found = null;
     for (const loc of p.locs || []) {
       const d = miles(here, loc);
-      if (!best || d < best.d) best = { d, loc };
+      if (!found || d < found.d) found = { d, loc };
     }
-    return best;
+    return found;
   }
 
   function formatMiles(d) {
@@ -260,36 +378,74 @@
   function render() {
     const f = state.filters;
     const here = state.here;
-    const list = state.places.filter((p) => matches(p, f)).map((p) => ({ p, near: here ? nearest(p, here) : null }));
+    const t0 = now();
 
-    // Closest first; places Google couldn't locate go last, A–Z.
-    list.sort((a, b) =>
-      (a.near ? a.near.d : Infinity) - (b.near ? b.near.d : Infinity) || a.p.name.localeCompare(b.p.name));
+    // 1. Everything that passes the basic filters, nearest first.
+    const rows = state.places.filter((p) => matches(p, f)).map((p) => ({ p, near: here ? nearest(p, here) : null }));
+    rows.sort((a, b) => (a.near ? a.near.d : Infinity) - (b.near ? b.near.d : Infinity) || a.p.name.localeCompare(b.p.name));
 
-    const closedCount = state.places.filter((p) => p.closed === "closed permanently").length;
-    const where = here ? `sorted by distance${here.acc > 100 ? ` (location ±${Math.round(here.acc)} m)` : ""}` : "A–Z";
-    $("status").textContent = `${list.length} places · ${where}` + (closedCount ? ` · ${closedCount} closed hidden` : "");
-    if (state.hereError) {
-      $("error").textContent = state.hereError;
-      $("error").hidden = false;
+    // 2. The nearest few get real travel times (fetched in the background if missing).
+    //    timesFor() first drops saved times if you've moved or they're old.
+    const toTime = rows.filter((x) => x.near).slice(0, TIMED);
+    if (here) { timesFor(here); requestTimes(toTime); }
+    const timed = new Set(toTime.map((x) => x.p.key));
+    state.timedCount = toTime.length;
+
+    // 3. Arrival time and opening hours on arrival.
+    for (const x of rows) {
+      x.trip = timed.has(x.p.key) ? best(state.times.byKey[x.p.key]) : null;
+      x.arrive = new Date(t0.getTime() + (x.trip ? x.trip.min : 0) * 60000);
+      const tempClosed = x.p.closed === "closed temporarily";
+      x.hours = x.near && !tempClosed ? openInfo(x.near.loc.hours, x.arrive) : null;
+      x.closedOnArrival = tempClosed || (x.hours ? !x.hours.open : false);
     }
+
+    // 4. Time-based filters.
+    let list = rows;
+    if (f.open) list = list.filter((x) => !x.closedOnArrival);
+    if (f.max) list = list.filter((x) => x.trip && x.trip.min <= f.max);
+
+    // 5. Places with travel times first (fastest first), then the rest by distance;
+    //    within each, places closed when you'd arrive go last.
+    list.sort((a, b) =>
+      (a.trip ? 0 : 1) - (b.trip ? 0 : 1) ||
+      a.closedOnArrival - b.closedOnArrival ||
+      (a.trip && b.trip ? a.trip.min - b.trip.min : 0));
+    state.lastCount = list.length;
+    updateStatus();
 
     const out = $("list");
     out.replaceChildren();
     if (!list.length) {
       const empty = el("p", "empty", "Nothing matches these filters. ");
       const clear = el("button", "link", "Clear filters");
-      clear.addEventListener("click", () => setFilter({ q: "", section: "all", fav: false, deals: false, tag: "" }));
+      clear.addEventListener("click", () => setFilter({ q: "", section: "all", fav: false, deals: false, tag: "", open: false, max: 0 }));
       empty.append(clear);
       out.append(empty);
     }
-    for (const { p, near } of list.slice(0, state.shown)) out.append(card(p, near));
+    for (const x of list.slice(0, state.shown)) out.append(card(x));
     $("more").hidden = list.length <= state.shown;
     $("more").textContent = `Show more (${list.length - state.shown} left)`;
   }
 
-  function card(p, near) {
-    const c = el("article", "card place");
+  function updateStatus() {
+    const here = state.here;
+    const closedCount = state.places.filter((p) => p.closed === "closed permanently").length;
+    let where = "A–Z";
+    if (here) {
+      where = state.timesLoading ? "getting walking & transit times…"
+        : state.timesError ? "sorted by distance"
+        : `travel times for the nearest ${state.timedCount ?? TIMED}`;
+      if (here.acc > 100) where += ` (location ±${Math.round(here.acc)} m)`;
+    }
+    $("status").textContent = `${state.lastCount ?? 0} places · ${where}` + (closedCount ? ` · ${closedCount} closed hidden` : "");
+    const problem = state.hereError || state.timesError;
+    $("error").textContent = problem;
+    $("error").hidden = !problem;
+  }
+
+  function card({ p, near, trip, hours, arrive }) {
+    const c = el("article", "card place" + ((hours && !hours.open) || p.closed === "closed temporarily" ? " dim" : ""));
     const top = el("div", "top");
     const h2 = el("h2");
     if (p.menu) {
@@ -300,12 +456,28 @@
       h2.textContent = p.name;
     }
     top.append(h2);
-    if (near) top.append(el("span", "dist", formatMiles(near.d)));
+    if (trip) top.append(el("span", "dist", `${trip.min} min ${trip.mode === "walk" ? "🚶" : "🚌"}`));
+    else if (near) top.append(el("span", "dist", formatMiles(near.d)));
     c.append(top);
 
     if (p.desc || p.cuisine) c.append(el("p", "", p.desc || p.cuisine));
 
-    // Neighborhood, plus a Google Maps link to the closest location.
+    // Travel: both options, the faster one bold.
+    const t = state.times.byKey[p.key];
+    if (trip && t) {
+      const line = el("p", "meta");
+      const part = (mode, icon, min) => {
+        const s = el(trip.mode === mode ? "b" : "span", "", `${icon} ${min == null ? "no route" : min + " min"}`);
+        return s;
+      };
+      line.append(part("walk", "🚶", t.walk), " · ", part("transit", "🚌", t.transit), ` · arrive ~${clock(arrive)}`);
+      c.append(line);
+    }
+
+    // Hours on arrival (or now, for places without a travel time).
+    if (hours) c.append(hoursLine(hours, arrive, Boolean(trip)));
+
+    // Neighborhood, linking to the closest location in Google Maps.
     const where = el("p", "meta", "📍 ");
     const label = p.hood || (near ? near.loc.addr : "");
     if (near && near.loc.maps) {
@@ -324,9 +496,30 @@
     if (p.section === "recommend") chips.append(el("span", "chip star", "⭐ Been & loved"));
     if (p.fav) chips.append(el("span", "chip fav", "💚 Favorite"));
     if (p.closed === "closed temporarily") chips.append(el("span", "chip warn", "⏸ Temporarily closed (Google)"));
-    for (const t of p.tags) chips.append(el("span", "chip", t));
+    for (const tag of p.tags) chips.append(el("span", "chip", tag));
     if (chips.children.length) c.append(chips);
     return c;
+  }
+
+  /**
+   * With a travel time:    "🕒 Open till 11:30 PM · you'd have 2 h 46 min"
+   *                        "⚠️ Closes 9:00 PM · you'd have only 28 min"   (under SHORT_STAY)
+   * Without (arrival=now): "🕒 Open till 11:30 PM" / "⚠️ Closes 9:00 PM · in 28 min"
+   * Closed:                "🔴 Closed when you'd arrive · opens Sat 11:00 AM"
+   */
+  function hoursLine(h, arrive, isArrival) {
+    if (h.open && h.closesIn === Infinity) return el("p", "meta", "🕒 Open 24 hours");
+    if (h.open) {
+      const closes = clock(new Date(arrive.getTime() + h.closesIn * 60000));
+      const left = duration(h.closesIn);
+      if (h.closesIn < SHORT_STAY) {
+        return el("p", "hours-warn", `⚠️ Closes ${closes} · ${isArrival ? `you'd have only ${left}` : `in ${left}`}`);
+      }
+      return el("p", "meta", `🕒 Open till ${closes}` + (isArrival ? ` · you'd have ${left}` : ""));
+    }
+    const opens = new Date(arrive.getTime() + h.opensIn * 60000);
+    const otherDay = opens.toDateString() !== arrive.toDateString();
+    return el("p", "hours-closed", `🔴 Closed ${isArrival ? "when you'd arrive" : "now"} · opens ${clock(opens, otherDay)}`);
   }
 
   // Builds an element with text set safely (Sheet text is never treated as HTML).
@@ -351,6 +544,7 @@
   function applyFilterUI() {
     const f = state.filters;
     $("q").value = f.q;
+    $("max").value = String(f.max || 0);
     document.querySelectorAll("[data-section]").forEach((b) => b.setAttribute("aria-pressed", b.dataset.section === f.section));
     document.querySelectorAll("[data-flag]").forEach((b) => b.setAttribute("aria-pressed", Boolean(f[b.dataset.flag])));
   }
@@ -369,6 +563,7 @@
   document.querySelectorAll("[data-flag]").forEach((b) =>
     b.addEventListener("click", () => setFilter({ [b.dataset.flag]: !state.filters[b.dataset.flag] })));
   $("tag").addEventListener("change", (e) => setFilter({ tag: e.target.value }));
+  $("max").addEventListener("change", (e) => setFilter({ max: Number(e.target.value) }));
   $("more").addEventListener("click", () => { state.shown += PAGE; render(); });
 
   // ---------- Setup ----------
@@ -394,7 +589,7 @@
     btn.disabled = true;
     $("setup-error").hidden = true;
     try {
-      await fetchPlaces(cfg); // test the connection before saving it
+      await callScript(cfg); // test the connection before saving it
       saveJSON(CONFIG_KEY, cfg);
       load();
     } catch (err) {
@@ -409,6 +604,7 @@
   $("reconnect").addEventListener("click", showSetup);
 
   Object.assign(state.filters, loadJSON(FILTERS_KEY) || {});
+  Object.assign(state.times, loadJSON(TIMES_KEY) || {});
   applyFilterUI();
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js");
   load();

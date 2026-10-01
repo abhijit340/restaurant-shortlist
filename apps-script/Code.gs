@@ -31,6 +31,7 @@ function doGet(e) {
   const key = PropertiesService.getScriptProperties().getProperty('KEY');
   if (!key || !e || e.parameter.key !== key) return json_({ error: 'bad-key' });
   try {
+    if (e.parameter.action === 'times') return json_(travelTimes_(e.parameter.from, e.parameter.to));
     return json_({ places: withAppData_(readSourcePlaces_(), readAppData_()), loadedAt: new Date().toISOString() });
   } catch (err) {
     return json_({ error: String(err) });
@@ -157,11 +158,64 @@ function notify_(msg) {
   try { SpreadsheetApp.getActive().toast(msg, 'Nearby Eats', 15); } catch (e) { /* no UI in triggers */ }
 }
 
+// ---------- Travel times (walking + transit) ----------
+
+const MAX_DESTINATIONS = 20; // the app sends ~15; this caps the cost of any one request
+
+/**
+ * from = "lat,lng"; to = "lat,lng|lat,lng|…". Returns { walk: [minutes|null…], transit: [...] }
+ * in the same order as `to`. Walking and transit are fetched in parallel.
+ */
+function travelTimes_(from, to) {
+  const origin = parseLatLng_(from);
+  const dests = String(to || '').split('|').filter(Boolean).map(parseLatLng_);
+  if (!origin || !dests.length || dests.length > MAX_DESTINATIONS || dests.some(d => !d)) {
+    return { error: 'bad-request' };
+  }
+  const apiKey = PropertiesService.getScriptProperties().getProperty('MAPS_KEY');
+  if (!apiKey) return { error: 'MAPS_KEY is missing from Script Properties.' };
+  // Transit has the smaller allowance, so check it first.
+  if (!spend_('matrixTransit', dests.length)) return { error: 'monthly-limit' };
+  if (!spend_('matrixWalk', dests.length)) return { error: 'monthly-limit' };
+
+  const [walk, transit] = UrlFetchApp.fetchAll(['WALK', 'TRANSIT'].map(mode => matrixRequest_(origin, dests, mode, apiKey)))
+    .map(res => parseMatrix_(res.getResponseCode(), res.getContentText(), dests.length));
+  return { walk, transit };
+}
+
+function parseLatLng_(s) {
+  const m = /^(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)$/.exec(String(s || '').trim());
+  return m ? { latitude: Number(m[1]), longitude: Number(m[2]) } : null;
+}
+
+function matrixRequest_(origin, dests, mode, apiKey) {
+  const point = (ll) => ({ waypoint: { location: { latLng: ll } } });
+  return {
+    url: 'https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix',
+    method: 'post',
+    contentType: 'application/json',
+    muteHttpExceptions: true,
+    headers: { 'X-Goog-Api-Key': apiKey, 'X-Goog-FieldMask': 'originIndex,destinationIndex,duration,condition' },
+    payload: JSON.stringify({ origins: [point(origin)], destinations: dests.map(point), travelMode: mode }),
+  };
+}
+
+/** Google's answer → minutes per destination (null where no route or an error). Pure, testable. */
+function parseMatrix_(code, body, count) {
+  const minutes = new Array(count).fill(null);
+  if (code !== 200) return minutes;
+  for (const el of JSON.parse(body)) {
+    if (el.condition !== 'ROUTE_EXISTS' || !el.duration) continue;
+    minutes[el.destinationIndex || 0] = Math.round(parseInt(el.duration, 10) / 60);
+  }
+  return minutes;
+}
+
 // ---------- Usage counter (hard monthly cap) ----------
 
 /** Records n requests for a Google service; returns false (and records nothing) past the cap. */
 function spend_(sku, n) {
-  const lock = LockService.getDocumentLock();
+  const lock = LockService.getDocumentLock() || LockService.getScriptLock();
   lock.waitLock(10000);
   try {
     const props = PropertiesService.getScriptProperties();
@@ -423,7 +477,7 @@ function withAppData_(places, data) {
       cuisine: locs[0] ? locs[0].cuisine : '',
       closed: overallStatus_(locs),
       locs: locs.filter(l => l.status !== 'CLOSED_PERMANENTLY')
-        .map(l => ({ lat: l.lat, lng: l.lng, addr: l.addr, maps: l.maps })),
+        .map(l => ({ lat: l.lat, lng: l.lng, addr: l.addr, maps: l.maps, hours: l.hours || [] })),
     });
   });
 }

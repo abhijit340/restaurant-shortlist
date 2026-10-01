@@ -64,8 +64,8 @@ const g = (name, lat, status = 'OPERATIONAL', periods = []) => ({
 
 (async () => {
   const code = await (await fetch('../apps-script/Code.gs')).text();
-  const { parseSheet, buildQuery_, toRecord_, namesMatch_, overallStatus_, needsLookup_, withAppData_ } =
-    new Function(code + '\nreturn { parseSheet, buildQuery_, toRecord_, namesMatch_, overallStatus_, needsLookup_, withAppData_ };')();
+  const { parseSheet, buildQuery_, toRecord_, namesMatch_, overallStatus_, needsLookup_, withAppData_, parseMatrix_, parseLatLng_ } =
+    new Function(code + '\nreturn { parseSheet, buildQuery_, toRecord_, namesMatch_, overallStatus_, needsLookup_, withAppData_, parseMatrix_, parseLatLng_ };')();
   const places = parseSheet(SYNTHETIC);
   const find = (k) => places.find(p => p.key === k);
 
@@ -131,6 +131,16 @@ const g = (name, lat, status = 'OPERATIONAL', periods = []) => ({
     ['match: one typo, short word ("gnoma")', namesMatch_('gnoma lao', 'Noma Lhao Shop')],
     ['no match: two typos', !namesMatch_('quokka', 'Quacker Bar')],
     ['no match: 3-letter words need exact', !namesMatch_('Pho Ahn', 'Phu Bay')],
+    ['app gets hours with each location', JSON.stringify(withAppData_([P('Echo Eatery')], new Map([['echo eatery', chain]]))[0].locs[0].hours) === '[[1,1100,1,2230]]'],
+    ['lat,lng parsed', JSON.stringify(parseLatLng_('47.61,-122.33')) === '{"latitude":47.61,"longitude":-122.33}'],
+    ['bad lat,lng rejected', parseLatLng_('47.61;-122.33') === null && parseLatLng_('') === null],
+    ['matrix: seconds → minutes, in destination order', JSON.stringify(parseMatrix_(200, JSON.stringify([
+      { originIndex: 0, destinationIndex: 1, duration: '754s', condition: 'ROUTE_EXISTS' },
+      { originIndex: 0, destinationIndex: 0, duration: '120s', condition: 'ROUTE_EXISTS' },
+      { originIndex: 0, destinationIndex: 2, condition: 'ROUTE_NOT_FOUND' },
+    ]), 3)) === '[2,13,null]'],
+    ['matrix: first destination has no index field', parseMatrix_(200, '[{"duration":"60s","condition":"ROUTE_EXISTS"}]', 1)[0] === 1],
+    ['matrix: HTTP error → all null', JSON.stringify(parseMatrix_(403, 'denied', 2)) === '[null,null]'],
   );
   const ul = document.getElementById('checks');
   for (const [label, ok] of checks) {
