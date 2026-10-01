@@ -141,7 +141,7 @@
   <button id="more" hidden>Show more</button>
 
   <footer>
-    v0.9<span id="reconnect" hidden> · <button class="link">Change Sheet connection</button></span>
+    v0.10<span id="reconnect" hidden> · <button class="link">Change Sheet connection</button></span>
   </footer>
 </main>
 
@@ -250,7 +250,10 @@
       return;
     }
     state.places = data.value.places;
-    for (const p of state.places) p.dealWindows = Deals.parseDeals(p.deals).windows;
+    for (const p of state.places) {
+      p.dealWindows = Deals.parseDeals(p.deals).windows;
+      p.inkind = /\binkind\b/i.test(`${p.deals} ${p.desc}`); // inKind dining credit accepted
+    }
     state.shown = PAGE;
     fillTagOptions();
     $("controls").hidden = false;
@@ -418,6 +421,8 @@
       x.deal = !x.closedOnArrival && x.p.dealWindows.length
         ? Deals.dealAt(x.p.dealWindows, x.arrive, x.hours && x.hours.open ? x.hours.closesIn : null)
         : null;
+      // inKind places rank like a happy hour whenever they're open when you'd arrive.
+      x.boost = Boolean(x.deal) || (x.p.inkind && !x.closedOnArrival);
     }
 
     // 4. Time-based filters.
@@ -426,12 +431,12 @@
     if (f.max) list = list.filter((x) => x.trip && x.trip.fastest <= f.max);
 
     // 5. Places with travel times first (shortest transit first), then the rest by distance.
-    //    Within each: deals on (or starting soon) when you'd arrive jump to the top;
-    //    places closed when you'd arrive go last.
+    //    Within each: deals on (or starting soon) when you'd arrive, and inKind places,
+    //    jump to the top; places closed when you'd arrive go last.
     list.sort((a, b) =>
       (a.trip ? 0 : 1) - (b.trip ? 0 : 1) ||
       a.closedOnArrival - b.closedOnArrival ||
-      (a.deal ? 0 : 1) - (b.deal ? 0 : 1) ||
+      (a.boost ? 0 : 1) - (b.boost ? 0 : 1) ||
       (a.trip && b.trip ? a.trip.min - b.trip.min : 0));
     state.lastCount = list.length;
     updateStatus();
@@ -506,6 +511,7 @@
     const chips = el("div", "chips");
     if (p.section === "recommend") chips.append(el("span", "chip star", "⭐ Been & loved"));
     if (p.fav) chips.append(el("span", "chip fav", "💚 Favorite"));
+    if (p.inkind) chips.append(el("span", "chip fav", "💳 inKind"));
     if (p.closed === "closed temporarily") chips.append(el("span", "chip warn", "⏸ Temporarily closed (Google)"));
     for (const tag of p.tags) chips.append(el("span", "chip", tag));
     if (chips.children.length) c.append(chips);
