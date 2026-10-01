@@ -30,7 +30,7 @@
     main { max-width: 560px; margin: 0 auto; }
     header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
     h1 { font-size: 1.5rem; margin: 8px 0 4px; }
-    .sub { color: var(--muted); margin: 0 0 16px; font-size: .9rem; }
+    .sub { color: var(--muted); margin: 0 0 12px; font-size: .9rem; }
     button {
       padding: 12px 16px; font-size: 1rem; font-weight: 600; border: 0; border-radius: 12px;
       background: var(--accent); color: var(--accent-text);
@@ -43,21 +43,38 @@
       padding: 14px 16px; margin-top: 12px;
     }
     label { display: block; font-weight: 600; margin: 12px 0 4px; }
-    input {
+    input, select {
       width: 100%; padding: 12px; font-size: 1rem; border-radius: 10px;
-      border: 1px solid var(--border); background: var(--bg); color: var(--text);
+      border: 1px solid var(--border); background: var(--card); color: var(--text);
     }
     .hint { color: var(--muted); font-size: .85rem; margin: 4px 0 0; }
     .error { color: var(--error); }
-    .place h2 { font-size: 1.05rem; margin: 0 0 4px; }
+
+    /* Filters */
+    #controls { display: grid; gap: 8px; }
+    .row { display: flex; gap: 6px; flex-wrap: wrap; }
+    .toggle {
+      padding: 8px 12px; font-size: .9rem; font-weight: 500; border-radius: 999px;
+      background: var(--card); color: var(--text); border: 1px solid var(--border);
+    }
+    .toggle[aria-pressed="true"] { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+    #tag { width: auto; padding: 8px 12px; font-size: .9rem; border-radius: 999px; }
+
+    /* Place cards */
+    .place h2 { font-size: 1.05rem; margin: 0; flex: 1; }
     .place h2 a { color: inherit; text-decoration-color: var(--border); }
+    .place .top { display: flex; gap: 12px; align-items: baseline; margin-bottom: 4px; }
+    .dist { font-weight: 600; color: var(--accent); white-space: nowrap; font-variant-numeric: tabular-nums; }
     .place p { margin: 4px 0 0; }
     .meta { color: var(--muted); font-size: .9rem; }
+    .meta a { color: inherit; }
     .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
     .chip { font-size: .78rem; padding: 2px 8px; border-radius: 999px; background: var(--chip); }
     .chip.star { background: var(--star-bg); color: var(--star); }
     .chip.fav { background: var(--fav-bg); color: var(--fav); }
     .chip.warn { background: var(--chip); color: var(--error); }
+    #more { margin-top: 12px; width: 100%; background: var(--card); color: var(--text); border: 1px solid var(--border); }
+    .empty { color: var(--muted); text-align: center; padding: 24px 0; }
     footer { color: var(--muted); font-size: .8rem; margin-top: 24px; text-align: center; }
     [hidden] { display: none !important; }
   </style>
@@ -68,7 +85,7 @@
     <h1>Nearby Eats</h1>
     <button id="refresh" hidden>Refresh</button>
   </header>
-  <p class="sub" id="status">Step 3: list with Google info</p>
+  <p class="sub" id="status">Loading…</p>
 
   <!-- One-time connection to the Google Sheet's script -->
   <form class="card" id="setup" hidden>
@@ -83,30 +100,58 @@
     <button class="wide" style="margin-top:16px">Connect</button>
   </form>
 
+  <div id="controls" hidden>
+    <input id="q" type="search" placeholder="Search: sushi, brunch, ballard…" autocomplete="off">
+    <div class="row">
+      <button class="toggle" data-section="all" aria-pressed="true">All</button>
+      <button class="toggle" data-section="try" aria-pressed="false">To try</button>
+      <button class="toggle" data-section="recommend" aria-pressed="false">⭐ Loved</button>
+    </div>
+    <div class="row">
+      <button class="toggle" data-flag="fav" aria-pressed="false">💚 Favorites</button>
+      <button class="toggle" data-flag="deals" aria-pressed="false">🍹 Deals</button>
+      <select id="tag" aria-label="Group"><option value="">All groups</option></select>
+    </div>
+  </div>
+
   <div class="card error" id="error" hidden></div>
   <div id="list"></div>
+  <button id="more" hidden>Show more</button>
 
   <footer>
-    v0.3<span id="reconnect" hidden> · <button class="link">Change Sheet connection</button></span>
+    v0.4<span id="reconnect" hidden> · <button class="link">Change Sheet connection</button></span>
   </footer>
 </main>
 
 <script>
   const $ = (id) => document.getElementById(id);
   const CONFIG_KEY = "nearbyeats.config";
+  const FILTERS_KEY = "nearbyeats.filters";
+  const PAGE = 40; // cards shown at a time
 
-  // localStorage can throw (private mode, blocked storage), so never trust it blindly.
-  function loadConfig() {
-    try { return JSON.parse(localStorage.getItem(CONFIG_KEY)) || null; } catch { return null; }
+  const state = {
+    places: [],
+    here: null,        // { lat, lng, acc } once we know where you are
+    hereError: "",
+    filters: { q: "", section: "all", fav: false, deals: false, tag: "" },
+    shown: PAGE,
+  };
+
+  // ---------- Storage (can throw in private mode, so always guarded) ----------
+
+  function loadJSON(key) {
+    try { return JSON.parse(localStorage.getItem(key)) || null; } catch { return null; }
   }
-  function saveConfig(cfg) {
-    try { localStorage.setItem(CONFIG_KEY, JSON.stringify(cfg)); } catch {}
+  function saveJSON(key, value) {
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
   }
+
+  // ---------- Data and location ----------
 
   async function fetchPlaces(cfg) {
     let res;
     try {
-      res = await fetch(`${cfg.url}?key=${encodeURIComponent(cfg.key)}`);
+      res = await fetch(`${cfg.url}?key=${encodeURIComponent(cfg.key)}`, { cache: "no-store" });
     } catch {
       throw new Error("Couldn't reach Google. Check your connection and try again.");
     }
@@ -120,61 +165,168 @@
     return data;
   }
 
+  const LOCATION_ERRORS = {
+    1: "Location is blocked, so the list is A–Z. To allow it: tap the icon left of the address bar → Permissions → Location.",
+    2: "Couldn't get a location (is Location on?), so the list is A–Z.",
+    3: "Location timed out, so the list is A–Z. Tap Refresh to try again.",
+  };
+
+  function locate() {
+    // For testing on a computer: add ?at=47.61,-122.33 to the address.
+    const at = new URLSearchParams(location.search).get("at");
+    if (at) {
+      const [lat, lng] = at.split(",").map(Number);
+      return Promise.resolve({ lat, lng, acc: 0 });
+    }
+    return new Promise((resolve, reject) => {
+      if (!("geolocation" in navigator)) return reject(new Error("This browser doesn't support location."));
+      navigator.geolocation.getCurrentPosition(
+        (pos) => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude, acc: pos.coords.accuracy }),
+        (err) => reject(new Error(LOCATION_ERRORS[err.code] || err.message)),
+        { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 }
+      );
+    });
+  }
+
   async function load() {
-    const cfg = loadConfig();
+    const cfg = loadJSON(CONFIG_KEY);
     if (!cfg) return showSetup();
     $("setup").hidden = true;
     $("error").hidden = true;
     $("refresh").hidden = false;
     $("reconnect").hidden = false;
     $("refresh").disabled = true;
-    $("status").textContent = "Loading from the Sheet…";
-    try {
-      const data = await fetchPlaces(cfg);
-      render(data.places);
-      const time = new Date(data.loadedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-      $("status").textContent = `${data.places.length} places · loaded ${time}`;
-    } catch (err) {
+    $("status").textContent = "Loading from the Sheet and finding you…";
+
+    // Fetch the list and find your location at the same time.
+    const [data, here] = await Promise.allSettled([fetchPlaces(cfg), locate()]);
+    $("refresh").disabled = false;
+
+    state.here = here.status === "fulfilled" ? here.value : null;
+    state.hereError = here.status === "rejected" ? here.reason.message : "";
+
+    if (data.status === "rejected") {
       $("status").textContent = "";
-      $("error").textContent = err.message;
+      $("error").textContent = data.reason.message;
       $("error").hidden = false;
-    } finally {
-      $("refresh").disabled = false;
+      return;
     }
+    state.places = data.value.places;
+    state.shown = PAGE;
+    fillTagOptions();
+    $("controls").hidden = false;
+    render();
   }
 
-  function render(places) {
-    const list = $("list");
-    list.replaceChildren();
-    // Recommended first, then favorites, then alphabetical.
-    const order = (p) => (p.section === "recommend" ? 0 : 2) + (p.fav ? 0 : 1);
-    places.sort((a, b) => order(a) - order(b) || a.name.localeCompare(b.name));
+  // ---------- Distance ----------
 
-    for (const p of places) {
-      const card = el("article", "card place");
-      const h2 = el("h2");
-      if (p.menu) {
-        const a = el("a", "", p.name);
-        a.href = p.menu; a.target = "_blank"; a.rel = "noopener";
-        h2.append(a);
-      } else {
-        h2.textContent = p.name;
-      }
-      card.append(h2);
-      if (p.desc || p.cuisine) card.append(el("p", "", p.desc || p.cuisine));
-      if (p.hood) card.append(el("p", "meta", "📍 " + p.hood));
-      if (p.deals) card.append(el("p", "meta", "🍹 " + p.deals));
+  /** Straight-line distance in miles (haversine). */
+  function miles(a, b) {
+    const R = 3958.8, rad = Math.PI / 180;
+    const dLat = (b.lat - a.lat) * rad, dLng = (b.lng - a.lng) * rad;
+    const h = Math.sin(dLat / 2) ** 2 + Math.cos(a.lat * rad) * Math.cos(b.lat * rad) * Math.sin(dLng / 2) ** 2;
+    return 2 * R * Math.asin(Math.sqrt(h));
+  }
 
-      const chips = el("div", "chips");
-      if (p.section === "recommend") chips.append(el("span", "chip star", "⭐ Been & loved"));
-      if (p.fav) chips.append(el("span", "chip fav", "💚 Favorite"));
-      if (p.closed === "closed permanently") chips.append(el("span", "chip warn", "⚠️ Closed permanently (Google)"));
-      if (p.closed === "closed temporarily") chips.append(el("span", "chip warn", "⏸ Temporarily closed (Google)"));
-      for (const t of p.tags) chips.append(el("span", "chip", t));
-      if (chips.children.length) card.append(chips);
-
-      list.append(card);
+  /** For chains, the closest open location wins. */
+  function nearest(p, here) {
+    let best = null;
+    for (const loc of p.locs || []) {
+      const d = miles(here, loc);
+      if (!best || d < best.d) best = { d, loc };
     }
+    return best;
+  }
+
+  function formatMiles(d) {
+    return d < 0.1 ? "< 0.1 mi" : d < 10 ? d.toFixed(1) + " mi" : Math.round(d) + " mi";
+  }
+
+  // ---------- Filtering and rendering ----------
+
+  function matches(p, f) {
+    if (p.closed === "closed permanently") return false;
+    if (f.section !== "all" && p.section !== f.section) return false;
+    if (f.fav && !p.fav) return false;
+    if (f.deals && !p.deals) return false;
+    if (f.tag && !p.tags.includes(f.tag)) return false;
+    if (f.q) {
+      const hay = [p.name, p.desc, p.cuisine, p.hood, p.deals, ...p.tags].join(" ").toLowerCase();
+      if (!f.q.toLowerCase().split(/\s+/).every((w) => hay.includes(w))) return false;
+    }
+    return true;
+  }
+
+  function render() {
+    const f = state.filters;
+    const here = state.here;
+    const list = state.places.filter((p) => matches(p, f)).map((p) => ({ p, near: here ? nearest(p, here) : null }));
+
+    // Closest first; places Google couldn't locate go last, A–Z.
+    list.sort((a, b) =>
+      (a.near ? a.near.d : Infinity) - (b.near ? b.near.d : Infinity) || a.p.name.localeCompare(b.p.name));
+
+    const closedCount = state.places.filter((p) => p.closed === "closed permanently").length;
+    const where = here ? `sorted by distance${here.acc > 100 ? ` (location ±${Math.round(here.acc)} m)` : ""}` : "A–Z";
+    $("status").textContent = `${list.length} places · ${where}` + (closedCount ? ` · ${closedCount} closed hidden` : "");
+    if (state.hereError) {
+      $("error").textContent = state.hereError;
+      $("error").hidden = false;
+    }
+
+    const out = $("list");
+    out.replaceChildren();
+    if (!list.length) {
+      const empty = el("p", "empty", "Nothing matches these filters. ");
+      const clear = el("button", "link", "Clear filters");
+      clear.addEventListener("click", () => setFilter({ q: "", section: "all", fav: false, deals: false, tag: "" }));
+      empty.append(clear);
+      out.append(empty);
+    }
+    for (const { p, near } of list.slice(0, state.shown)) out.append(card(p, near));
+    $("more").hidden = list.length <= state.shown;
+    $("more").textContent = `Show more (${list.length - state.shown} left)`;
+  }
+
+  function card(p, near) {
+    const c = el("article", "card place");
+    const top = el("div", "top");
+    const h2 = el("h2");
+    if (p.menu) {
+      const a = el("a", "", p.name);
+      a.href = p.menu; a.target = "_blank"; a.rel = "noopener";
+      h2.append(a);
+    } else {
+      h2.textContent = p.name;
+    }
+    top.append(h2);
+    if (near) top.append(el("span", "dist", formatMiles(near.d)));
+    c.append(top);
+
+    if (p.desc || p.cuisine) c.append(el("p", "", p.desc || p.cuisine));
+
+    // Neighborhood, plus a Google Maps link to the closest location.
+    const where = el("p", "meta", "📍 ");
+    const label = p.hood || (near ? near.loc.addr : "");
+    if (near && near.loc.maps) {
+      const a = el("a", "", label || "Map");
+      a.href = near.loc.maps; a.target = "_blank"; a.rel = "noopener";
+      where.append(a);
+    } else {
+      where.append(label || "No location yet");
+    }
+    if (p.locs && p.locs.length > 1) where.append(` · nearest of ${p.locs.length}`);
+    c.append(where);
+
+    if (p.deals) c.append(el("p", "meta", "🍹 " + p.deals));
+
+    const chips = el("div", "chips");
+    if (p.section === "recommend") chips.append(el("span", "chip star", "⭐ Been & loved"));
+    if (p.fav) chips.append(el("span", "chip fav", "💚 Favorite"));
+    if (p.closed === "closed temporarily") chips.append(el("span", "chip warn", "⏸ Temporarily closed (Google)"));
+    for (const t of p.tags) chips.append(el("span", "chip", t));
+    if (chips.children.length) c.append(chips);
+    return c;
   }
 
   // Builds an element with text set safely (Sheet text is never treated as HTML).
@@ -185,14 +337,52 @@
     return node;
   }
 
+  function fillTagOptions() {
+    const tags = [...new Set(state.places.flatMap((p) => p.tags))].sort();
+    const select = $("tag");
+    select.replaceChildren(new Option("All groups", ""), ...tags.map((t) => new Option(t, t)));
+    if (!tags.includes(state.filters.tag)) state.filters.tag = "";
+    select.value = state.filters.tag;
+    select.hidden = !tags.length;
+  }
+
+  // ---------- Filter controls ----------
+
+  function applyFilterUI() {
+    const f = state.filters;
+    $("q").value = f.q;
+    document.querySelectorAll("[data-section]").forEach((b) => b.setAttribute("aria-pressed", b.dataset.section === f.section));
+    document.querySelectorAll("[data-flag]").forEach((b) => b.setAttribute("aria-pressed", Boolean(f[b.dataset.flag])));
+  }
+
+  function setFilter(change) {
+    Object.assign(state.filters, change);
+    state.shown = PAGE;
+    saveJSON(FILTERS_KEY, state.filters);
+    applyFilterUI();
+    render();
+  }
+
+  $("q").addEventListener("input", (e) => setFilter({ q: e.target.value.trim() }));
+  document.querySelectorAll("[data-section]").forEach((b) =>
+    b.addEventListener("click", () => setFilter({ section: b.dataset.section })));
+  document.querySelectorAll("[data-flag]").forEach((b) =>
+    b.addEventListener("click", () => setFilter({ [b.dataset.flag]: !state.filters[b.dataset.flag] })));
+  $("tag").addEventListener("change", (e) => setFilter({ tag: e.target.value }));
+  $("more").addEventListener("click", () => { state.shown += PAGE; render(); });
+
+  // ---------- Setup ----------
+
   function showSetup() {
-    const cfg = loadConfig();
+    const cfg = loadJSON(CONFIG_KEY);
     $("url").value = cfg?.url || "";
     $("key").value = cfg?.key || "";
     $("setup").hidden = false;
+    $("controls").hidden = true;
     $("refresh").hidden = true;
     $("reconnect").hidden = true;
     $("error").hidden = true;
+    $("more").hidden = true;
     $("list").replaceChildren();
     $("status").textContent = "One-time setup";
   }
@@ -205,7 +395,7 @@
     $("setup-error").hidden = true;
     try {
       await fetchPlaces(cfg); // test the connection before saving it
-      saveConfig(cfg);
+      saveJSON(CONFIG_KEY, cfg);
       load();
     } catch (err) {
       $("setup-error").textContent = err.message;
@@ -218,6 +408,8 @@
   $("refresh").addEventListener("click", load);
   $("reconnect").addEventListener("click", showSetup);
 
+  Object.assign(state.filters, loadJSON(FILTERS_KEY) || {});
+  applyFilterUI();
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js");
   load();
 </script>
