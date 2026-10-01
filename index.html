@@ -140,7 +140,7 @@
   <button id="more" hidden>Show more</button>
 
   <footer>
-    v0.6<span id="reconnect" hidden> · <button class="link">Change Sheet connection</button></span>
+    v0.7<span id="reconnect" hidden> · <button class="link">Change Sheet connection</button></span>
   </footer>
 </main>
 
@@ -154,6 +154,7 @@
   const REUSE_METERS = 200;          // reuse travel times if you've moved less than this…
   const REUSE_MS = 10 * 60 * 1000;   // …within this long
   const SHORT_STAY = 60;             // flag if you'd have less than this many minutes before closing
+  const SHOW_WALK_UNDER = 25;        // list the walk next to transit when it's shorter than this
 
   // For testing on a computer: ?at=47.61,-122.33 fakes your location, ?now=2026-10-02T21:30 fakes the clock.
   const params = new URLSearchParams(location.search);
@@ -298,13 +299,17 @@
     }
   }
 
-  /** Fastest way there: { min, mode } or null. */
-  function best(t) {
+  /**
+   * The trip, transit first: { min, mode, walk, transit, fastest } or null.
+   * `min`/`mode` (transit, or walking if there's no transit route) drive sorting
+   * and arrival time; `fastest` is used only by the "Within N min" filter.
+   */
+  function trip(t) {
     if (!t || t.failed) return null;
-    const options = [["walk", t.walk], ["transit", t.transit]].filter(([, m]) => m != null);
-    if (!options.length) return null;
-    const [mode, min] = options.sort((a, b) => a[1] - b[1])[0];
-    return { mode, min };
+    const min = t.transit ?? t.walk;
+    if (min == null) return null;
+    const options = [t.walk, t.transit].filter((m) => m != null);
+    return { min, mode: t.transit != null ? "transit" : "walk", walk: t.walk, transit: t.transit, fastest: Math.min(...options) };
   }
 
   // ---------- Opening hours ----------
@@ -398,7 +403,7 @@
 
     // 3. Arrival time and opening hours on arrival.
     for (const x of rows) {
-      x.trip = timed.has(x.p.key) ? best(state.times.byKey[x.p.key]) : null;
+      x.trip = timed.has(x.p.key) ? trip(state.times.byKey[x.p.key]) : null;
       x.arrive = new Date(t0.getTime() + (x.trip ? x.trip.min : 0) * 60000);
       const tempClosed = x.p.closed === "closed temporarily";
       x.hours = x.near && !tempClosed ? openInfo(x.near.loc.hours, x.arrive) : null;
@@ -408,9 +413,9 @@
     // 4. Time-based filters.
     let list = rows;
     if (f.open) list = list.filter((x) => !x.closedOnArrival);
-    if (f.max) list = list.filter((x) => x.trip && x.trip.min <= f.max);
+    if (f.max) list = list.filter((x) => x.trip && x.trip.fastest <= f.max);
 
-    // 5. Places with travel times first (fastest first), then the rest by distance;
+    // 5. Places with travel times first (shortest transit first), then the rest by distance;
     //    within each, places closed when you'd arrive go last.
     list.sort((a, b) =>
       (a.trip ? 0 : 1) - (b.trip ? 0 : 1) ||
@@ -461,15 +466,16 @@
 
     if (p.desc || p.cuisine) c.append(el("p", "", p.desc || p.cuisine));
 
-    // Travel: both options, the faster one bold.
-    const t = state.times.byKey[p.key];
-    if (trip && t) {
+    // Travel: transit first, plus the walk when it's short enough to be a real option
+    // ("🚌 17 min or 🚶 20 min walk").
+    if (trip) {
       const line = el("p", "meta");
-      const part = (mode, icon, min) => {
-        const s = el(trip.mode === mode ? "b" : "span", "", `${icon} ${min == null ? "no route" : min + " min"}`);
-        return s;
-      };
-      line.append(part("walk", "🚶", t.walk), " · ", part("transit", "🚌", t.transit), ` · arrive ~${clock(arrive)}`);
+      if (trip.transit != null) line.append(el("b", "", `🚌 ${trip.transit} min`));
+      if (trip.walk != null && (trip.walk < SHOW_WALK_UNDER || trip.transit == null)) {
+        if (trip.transit != null) line.append(" or ");
+        line.append(el(trip.transit == null ? "b" : "span", "", `🚶 ${trip.walk} min walk`));
+      }
+      line.append(` · arrive ~${clock(arrive)}`);
       c.append(line);
     }
 
