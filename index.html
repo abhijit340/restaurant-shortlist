@@ -200,7 +200,7 @@
   <button id="more" hidden>Show more</button>
 
   <footer>
-    v0.19 · <a href="help.html">Help</a><span id="reconnect" hidden> · <button class="link">Change Sheet connection</button></span>
+    v0.20 · <a href="help.html">Help</a><span id="reconnect" hidden> · <button class="link" id="share">Share setup link</button> · <button class="link" id="reconnect-btn">Change Sheet connection</button></span>
   </footer>
 </main>
 
@@ -1227,8 +1227,52 @@
     b.addEventListener("click", () => setView(b.dataset.view)));
 
   $("refresh").addEventListener("click", load);
-  $("reconnect").addEventListener("click", showSetup);
+  $("reconnect-btn").addEventListener("click", showSetup);
+  $("share").addEventListener("click", shareSetup);
 
+  // ---------- Sharing the app: one link that sets up another phone ----------
+  // The link carries the Sheet connection after a "#". That part of an address is
+  // never sent to any server; this page reads it, saves it, and removes it from
+  // the address bar. The link is as sensitive as the key itself.
+
+  const SCRIPT_URL = /^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/;
+  const LOCAL_URL = /^http:\/\/localhost(:\d+)?\//; // for testing on a computer
+
+  function setupLink() {
+    const cfg = loadJSON(CONFIG_KEY);
+    const packed = btoa(JSON.stringify({ u: cfg.url, k: cfg.key }));
+    return `${location.origin}${location.pathname}#setup=${encodeURIComponent(packed)}`;
+  }
+
+  async function shareSetup() {
+    if (!confirm("This link gives full access to your list, like a password. Only send it privately to someone who should have it.\n\nCreate the link?")) return;
+    const url = setupLink();
+    try {
+      if (navigator.share) return await navigator.share({ title: "Nearby Eats", text: "Open this once to set up Nearby Eats, then add it to your home screen.", url });
+      await navigator.clipboard.writeText(url);
+      alert("Setup link copied. Paste it into a private message.");
+    } catch (err) {
+      if (err.name !== "AbortError") prompt("Copy this setup link:", url); // sharing unavailable: show it to copy by hand
+    }
+  }
+
+  /** If the page was opened from a setup link, save its connection (asking first if one already exists). */
+  function adoptSetupLink() {
+    const m = /^#setup=(.+)$/.exec(location.hash);
+    if (!m) return;
+    history.replaceState(null, "", location.pathname + location.search); // out of the address bar right away
+    let d;
+    try { d = JSON.parse(atob(decodeURIComponent(m[1]))); } catch { return; }
+    // Only accept a Google Apps Script address, so a doctored link can't point the app somewhere else.
+    if (!d || typeof d.k !== "string" || !(SCRIPT_URL.test(d.u) || LOCAL_URL.test(d.u))) return;
+    const current = loadJSON(CONFIG_KEY);
+    if (current && current.url === d.u && current.key === d.k) return;
+    if (current && !confirm("This phone is already connected to a list. Replace that connection with the one from this link?")) return;
+    saveJSON(CONFIG_KEY, { url: d.u, key: d.k });
+    try { localStorage.removeItem(LIST_KEY); } catch {} // don't show another list's saved copy
+  }
+
+  adoptSetupLink();
   Object.assign(state.filters, loadJSON(FILTERS_KEY) || {});
   Object.assign(state.times, loadJSON(TIMES_KEY) || {});
   applyFilterUI();
