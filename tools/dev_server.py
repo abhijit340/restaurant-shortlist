@@ -41,6 +41,8 @@ class Handler(SimpleHTTPRequestHandler):
 
     def end_headers(self):
         self.send_header("Cache-Control", "no-store")
+        # Lets the live site (github.io) use this fake script too, for testing the real build.
+        self.send_header("Access-Control-Allow-Origin", "*")
         super().end_headers()
 
     def do_GET(self):

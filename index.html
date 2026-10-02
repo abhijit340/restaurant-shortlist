@@ -181,7 +181,7 @@
   <button id="more" hidden>Show more</button>
 
   <footer>
-    v0.13<span id="reconnect" hidden> · <button class="link">Change Sheet connection</button></span>
+    v0.14<span id="reconnect" hidden> · <button class="link">Change Sheet connection</button></span>
   </footer>
 </main>
 
@@ -539,7 +539,7 @@
   let gMarkers = [];     // Google's pins
 
   // ?gmaps tries Google's map without a key (it works, with a "development" watermark), for testing.
-  const useGoogle = () => Boolean(state.mapsKey) || params.has("gmaps");
+  const useGoogle = () => !state.mapKeyRejected && (Boolean(state.mapsKey) || params.has("gmaps"));
 
   function addScript(src) {
     return new Promise((ok, fail) => {
@@ -565,17 +565,31 @@
     return new Promise((ok, fail) => {
       window.__mapsReady = ok;
       // Google calls this if it rejects the key (wrong website restriction, API not enabled…).
-      window.gm_authFailure = () => { state.mapProblem = "Google rejected the map key. Check its website restriction and that Maps JavaScript API is enabled."; showMapHint(); };
+      window.gm_authFailure = useBackupMap;
       const key = state.mapsKey ? `key=${encodeURIComponent(state.mapsKey)}&` : "";
       addScript(`https://maps.googleapis.com/maps/api/js?${key}v=weekly&loading=async&callback=__mapsReady`).catch(fail);
     });
+  }
+
+  /** Google refused the key: throw away its (blank) map and draw the free one instead. */
+  function useBackupMap() {
+    state.mapKeyRejected = true;
+    state.mapNote = "Google rejected the map key, so this is the backup map. In Google Cloud, check the key's website restriction (https://abhijit340.github.io/*), that Maps JavaScript API is enabled and ticked for the key, and wait a few minutes if the key is new.";
+    gMarkers = [];
+    map = null;
+    mapLoading = null;
+    mapCenteredOn = null;
+    const fresh = el("div");
+    fresh.id = "map";
+    $("map").replaceWith(fresh);
+    render();
   }
 
   function showMapHint() {
     const hint = $("map-hint");
     hint.classList.toggle("picking", state.picking && !state.mapProblem);
     hint.textContent = state.mapProblem || (state.picking ? "Tap the map where you'll be starting from."
-      : "Tap a pin for details. Press and hold the map to start from that spot.");
+      : "Tap a pin for details. Press and hold the map to start from that spot.") + (state.mapNote ? " " + state.mapNote : "");
   }
 
   async function showMap(list) {
@@ -603,7 +617,14 @@
     const recenter = mapCenteredOn !== origin;
     mapCenteredOn = origin;
 
-    (useGoogle() ? drawGoogle : drawLeaflet)(pins, tapPin, recenter);
+    try {
+      (useGoogle() ? drawGoogle : drawLeaflet)(pins, tapPin, recenter);
+    } catch (err) {
+      // Say what went wrong instead of leaving an empty box.
+      state.mapProblem = `The map hit a problem: ${err.message}`;
+      showMapHint();
+      return;
+    }
 
     const chosen = list.find((x) => x.p.key === state.selectedKey);
     $("map-card").replaceChildren(...(chosen ? [card(chosen)] : []));
