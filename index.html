@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>Nearby Eats</title>
+  <title>Seattle Food &amp; Bev</title>
   <meta name="theme-color" content="#1f6f5c">
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icons/icon-192.png">
@@ -118,7 +118,7 @@
 <body>
 <main>
   <header>
-    <h1>Nearby Eats</h1>
+    <h1>Seattle Food &amp; Bev</h1>
     <button id="refresh" hidden>Refresh</button>
   </header>
   <p class="sub" id="status">Loading…</p>
@@ -200,7 +200,7 @@
   <button id="more" hidden>Show more</button>
 
   <footer>
-    v0.21 · <a href="help.html">Help</a> · <a href="colors.html">Colors</a><span id="reconnect" hidden> · <button class="link" id="share">Share setup link</button> · <button class="link" id="reconnect-btn">Change Sheet connection</button></span>
+    v0.22 · <a href="help.html">Help</a> · <a href="colors.html">Colors</a><span id="reconnect" hidden> · <button class="link" id="share">Share setup link</button> · <button class="link" id="reconnect-btn">Change Sheet connection</button></span>
   </footer>
 </main>
 
@@ -1253,7 +1253,7 @@
     if (!confirm("This link gives full access to your list, like a password. Only send it privately to someone who should have it.\n\nCreate the link?")) return;
     const url = setupLink();
     try {
-      if (navigator.share) return await navigator.share({ title: "Nearby Eats", text: "Open this once to set up Nearby Eats, then add it to your home screen.", url });
+      if (navigator.share) return await navigator.share({ title: "Seattle Food & Bev", text: "Open this once to set up Seattle Food & Bev, then add it to your home screen.", url });
       await navigator.clipboard.writeText(url);
       alert("Setup link copied. Paste it into a private message.");
     } catch (err) {

@@ -1,6 +1,6 @@
 {
-  "name": "Nearby Eats",
-  "short_name": "Nearby Eats",
+  "name": "Seattle Food & Bev",
+  "short_name": "Food & Bev",
   "description": "A restaurant shortlist, sorted by walking and transit time.",
   "start_url": "./",
   "scope": "./",

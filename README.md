@@ -1,4 +1,4 @@
-# Nearby Eats
+# Seattle Food & Bev
 
 A personal web app: a restaurant shortlist, sorted by walking and transit time from your current location.
 

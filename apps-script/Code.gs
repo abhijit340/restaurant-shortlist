@@ -1,5 +1,5 @@
 /**
- * Nearby Eats: backend script that lives inside the Google Sheet
+ * Seattle Food & Bev: backend script that lives inside the Google Sheet
  * (Extensions → Apps Script). It reads the restaurant tab, looks places up on
  * Google, and serves everything to the app as JSON. Secrets (the app key and
  * MAPS_KEY) live in Script Properties, never in this file.
@@ -81,7 +81,7 @@ function resetKey() {
 // ---------- Sheet menu ----------
 
 function onOpen() {
-  SpreadsheetApp.getUi().createMenu('Nearby Eats')
+  SpreadsheetApp.getUi().createMenu('Seattle Food & Bev')
     .addItem('Fill missing info', 'fillMissing')
     .addItem('Refresh hours now (10 oldest places)', 'refreshHoursNow')
     .addItem('Show Google usage this month', 'showUsage')
@@ -246,7 +246,7 @@ function deleteTriggers_(handler) {
 
 function notify_(msg) {
   Logger.log(msg);
-  try { SpreadsheetApp.getActive().toast(msg, 'Nearby Eats', 15); } catch (e) { /* no UI in triggers */ }
+  try { SpreadsheetApp.getActive().toast(msg, 'Seattle Food & Bev', 15); } catch (e) { /* no UI in triggers */ }
 }
 
 // ---------- Travel times (walking + transit) ----------
