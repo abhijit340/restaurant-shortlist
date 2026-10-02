@@ -65,6 +65,12 @@
     .plan-toggle.planned { border-color: var(--accent); color: var(--accent); font-weight: 600; }
     #plan-form { margin-top: 0; }
 
+    /* Map view */
+    #map { height: 58vh; min-height: 320px; margin-top: 8px; border-radius: 12px; border: 1px solid var(--border); z-index: 0; }
+    #map-hint.picking { color: var(--accent); font-weight: 600; }
+    .legend { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; }
+    .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; }
+
     /* Place cards: the whole card opens the place in Google Maps (a "stretched" link);
        other links on the card sit above it. */
     .place { position: relative; }
@@ -127,6 +133,7 @@
       <p class="error" id="plan-error" hidden></p>
       <div class="row" style="margin-top:12px; align-items:center">
         <button>Show places</button>
+        <button type="button" class="link" id="plan-pick">Pick on map</button>
         <button type="button" class="link" id="plan-reset">Back to here and now</button>
       </div>
     </form>
@@ -151,6 +158,22 @@
       <button class="toggle" data-flag="deals" aria-pressed="false">🍹 Deals</button>
       <select id="tag" aria-label="Group"><option value="">All groups</option></select>
     </div>
+    <div class="row">
+      <button class="toggle" data-view="list" aria-pressed="true">☰ List</button>
+      <button class="toggle" data-view="map" aria-pressed="false">🗺 Map</button>
+    </div>
+  </div>
+
+  <div id="mapwrap" hidden>
+    <p class="hint" id="map-hint"></p>
+    <div id="map"></div>
+    <p class="hint legend">
+      <span class="dot" style="background:#e0a100"></span>deal or inKind
+      <span class="dot" style="background:#1f6f5c"></span>open
+      <span class="dot" style="background:#9a9a94"></span>closed on arrival
+      <span class="dot" style="background:#2b6fd6"></span>you
+    </p>
+    <div id="map-card"></div>
   </div>
 
   <div class="card error" id="error" hidden></div>
@@ -158,7 +181,7 @@
   <button id="more" hidden>Show more</button>
 
   <footer>
-    v0.11<span id="reconnect" hidden> · <button class="link">Change Sheet connection</button></span>
+    v0.12<span id="reconnect" hidden> · <button class="link">Change Sheet connection</button></span>
   </footer>
 </main>
 
@@ -192,6 +215,9 @@
     times: { origin: null, at: 0, byKey: {} },  // travel times, keyed by place
     timesLoading: false,
     timesError: "",
+    view: "list",        // "list" or "map"
+    picking: false,      // true while waiting for a tap on the map to set the starting point
+    selectedKey: null,   // the place whose pin was tapped
   };
 
   // ---------- Storage (can throw in private mode, so always guarded) ----------
@@ -490,8 +516,102 @@
       out.append(empty);
     }
     for (const x of list.slice(0, state.shown)) out.append(card(x));
-    $("more").hidden = list.length <= state.shown;
     $("more").textContent = `Show more (${list.length - state.shown} left)`;
+
+    // 6. List or map: the same filtered places either way.
+    const mapMode = state.view === "map";
+    out.hidden = mapMode;
+    $("more").hidden = mapMode || list.length <= state.shown;
+    $("mapwrap").hidden = !mapMode;
+    if (mapMode) showMap(list);
+  }
+
+  // ---------- Map view (Leaflet + OpenStreetMap; loaded only when first opened) ----------
+
+  const LEAFLET = "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min";
+  const PIN = { boost: "#e0a100", open: "#1f6f5c", closed: "#9a9a94", you: "#2b6fd6" };
+  let map = null, pinLayer = null, leafletLoading = null, mapCenteredOn = null;
+
+  function loadLeaflet() {
+    if (window.L) return Promise.resolve();
+    leafletLoading ||= new Promise((ok, fail) => {
+      const css = document.createElement("link");
+      css.rel = "stylesheet"; css.href = LEAFLET + ".css";
+      const js = document.createElement("script");
+      js.src = LEAFLET + ".js"; js.onload = ok;
+      js.onerror = () => { leafletLoading = null; fail(new Error("map library didn't load")); };
+      document.head.append(css, js);
+    });
+    return leafletLoading;
+  }
+
+  async function showMap(list) {
+    const hint = $("map-hint");
+    hint.classList.toggle("picking", state.picking);
+    hint.textContent = state.picking ? "Tap the map where you'll be starting from."
+      : "Tap a pin for details. Press and hold the map to start from that spot.";
+    try { await loadLeaflet(); } catch {
+      hint.textContent = "Couldn't load the map. Check your connection and switch to Map again.";
+      return;
+    }
+    if (state.view !== "map") return; // switched away while loading
+
+    if (!map) {
+      map = L.map("map", { preferCanvas: true });
+      L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+        { maxZoom: 19, attribution: "© OpenStreetMap contributors" }).addTo(map);
+      pinLayer = L.layerGroup().addTo(map);
+      map.on("click", (e) => { if (state.picking) startFrom(e.latlng); });
+      map.on("contextmenu", (e) => startFrom(e.latlng)); // press and hold
+    }
+    map.invalidateSize(); // the map was hidden, so it needs to re-measure itself
+
+    pinLayer.clearLayers();
+    const points = [];
+    for (const x of list) {
+      if (!x.near) continue; // Google couldn't place it
+      const at = [x.near.loc.lat, x.near.loc.lng];
+      points.push(at);
+      const selected = x.p.key === state.selectedKey;
+      L.circleMarker(at, {
+        radius: selected ? 11 : 8, weight: selected ? 3 : 2, color: selected ? "#111" : "#fff", fillOpacity: 0.95,
+        fillColor: x.closedOnArrival ? PIN.closed : x.boost ? PIN.boost : PIN.open,
+      }).on("click", (e) => {
+        L.DomEvent.stopPropagation(e);
+        if (state.picking) return startFrom(e.latlng);
+        state.selectedKey = x.p.key;
+        render();
+      }).addTo(pinLayer);
+    }
+    if (state.here) {
+      L.circleMarker([state.here.lat, state.here.lng],
+        { radius: 9, weight: 3, color: "#fff", fillColor: PIN.you, fillOpacity: 1, interactive: false }).addTo(pinLayer);
+    }
+
+    // Re-centre only when the starting point changes, so panning around isn't undone.
+    const origin = state.here ? `${state.here.lat.toFixed(4)},${state.here.lng.toFixed(4)}` : "none";
+    if (mapCenteredOn !== origin) {
+      mapCenteredOn = origin;
+      if (state.here) map.setView([state.here.lat, state.here.lng], 14);
+      else if (points.length) map.fitBounds(points, { padding: [24, 24] });
+    }
+
+    const chosen = list.find((x) => x.p.key === state.selectedKey);
+    $("map-card").replaceChildren(...(chosen ? [card(chosen)] : []));
+  }
+
+  /** A spot picked on the map becomes the plan's starting point (the planned time is kept). */
+  function startFrom(latlng) {
+    state.picking = false;
+    state.plan = { ...state.plan, place: { query: "", label: "Dropped pin", lat: latlng.lat, lng: latlng.lng, pinned: true } };
+    relocate();
+  }
+
+  function setView(view) {
+    state.view = view;
+    if (view !== "map") state.picking = false;
+    document.querySelectorAll("[data-view]").forEach((b) => b.setAttribute("aria-pressed", b.dataset.view === view));
+    render();
   }
 
   function updateStatus() {
@@ -665,6 +785,7 @@
     $("reconnect").hidden = true;
     $("error").hidden = true;
     $("more").hidden = true;
+    $("mapwrap").hidden = true;
     $("list").replaceChildren();
     $("status").textContent = "One-time setup";
   }
@@ -708,7 +829,11 @@
     $("plan-toggle").setAttribute("aria-expanded", String(open));
     if (!open) return;
     $("plan-error").hidden = true;
-    $("plan-place").value = state.plan.place ? state.plan.place.query : "";
+    const place = state.plan.place;
+    $("plan-place").value = place ? place.query : "";
+    $("plan-place").placeholder = place && place.pinned
+      ? "Dropped pin (type a place to change it)"
+      : "Capitol Hill, an address… (blank = where I am)";
     $("plan-when").value = state.plan.when ? toLocalInput(new Date(state.plan.when)) : "";
     $("plan-when").min = toLocalInput(realNow());
   }
@@ -740,7 +865,8 @@
     btn.disabled = true;
     $("plan-error").hidden = true;
     try {
-      let place = null;
+      // A blank box keeps a pin dropped on the map; otherwise blank means "where I am".
+      let place = state.plan.place && state.plan.place.pinned ? state.plan.place : null;
       if (query) {
         // Each typed place is looked up once per session.
         const known = state.geocoded[query.toLowerCase()];
@@ -763,6 +889,17 @@
     showPlanForm(false);
     relocate();
   });
+
+  // "Pick on map": switch to the map and wait for one tap.
+  $("plan-pick").addEventListener("click", () => {
+    showPlanForm(false);
+    state.picking = true;
+    setView("map");
+    $("mapwrap").scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+
+  document.querySelectorAll("[data-view]").forEach((b) =>
+    b.addEventListener("click", () => setView(b.dataset.view)));
 
   $("refresh").addEventListener("click", load);
   $("reconnect").addEventListener("click", showSetup);
