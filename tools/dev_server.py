@@ -66,6 +66,7 @@ class Handler(SimpleHTTPRequestHandler):
             body = json.loads((ROOT / "tests" / "mock_exec.json").read_text(encoding="utf-8"))
             for place in body["places"]:
                 place["visit"] = VISITS.get(place["key"])
+                place["pending"] = place["key"] in PENDING
         self.send_json(body)
 
     def do_POST(self):
@@ -75,6 +76,10 @@ class Handler(SimpleHTTPRequestHandler):
         req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
         if req.get("key") != "test":
             body = {"error": "bad-key"}
+        elif req.get("action") == "fill":
+            looked = len(PENDING)
+            PENDING.clear()  # pretend Google was asked about every waiting place
+            body = {"ok": True, "looked": looked, "remaining": 0}
         elif req.get("action") != "visit":
             body = {"error": "bad-request"}
         elif req.get("place") == "unplaced bakery":
@@ -99,6 +104,7 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 VISITS = {}  # place key -> visit, for the fake script
+PENDING = {"unplaced bakery"}  # places "not looked up yet", until the app asks for a lookup
 
 
 if __name__ == "__main__":

@@ -195,12 +195,18 @@
     <div id="map-card"></div>
   </div>
 
+  <!-- Shown when the Sheet has places Google hasn't been asked about yet. -->
+  <div class="card" id="pending" hidden>
+    <span id="pending-text"></span>
+    <button class="visit-btn" id="pending-go" style="margin: 8px 0 0">Look up now</button>
+  </div>
+
   <div class="card error" id="error" hidden></div>
   <div id="list"></div>
   <button id="more" hidden>Show more</button>
 
   <footer>
-    v0.22 · <a href="help.html">Help</a> · <a href="colors.html">Colors</a><span id="reconnect" hidden> · <button class="link" id="share">Share setup link</button> · <button class="link" id="reconnect-btn">Change Sheet connection</button></span>
+    v0.23 · <a href="help.html">Help</a> · <a href="colors.html">Colors</a><span id="reconnect" hidden> · <button class="link" id="share">Share setup link</button> · <button class="link" id="reconnect-btn">Change Sheet connection</button></span>
   </footer>
 </main>
 
@@ -886,6 +892,12 @@
         : `travel times for the nearest ${state.timedCount ?? TIMED}`;
       if (here.acc > 100) where += ` (location ±${Math.round(here.acc)} m)`;
     }
+    // New rows in the Sheet show up at once, but need a Google lookup for location and hours.
+    const pending = state.offline ? 0 : state.places.filter((p) => p.pending).length;
+    $("pending").hidden = !pending;
+    $("pending-text").textContent = pending === 1
+      ? "1 place hasn't been looked up on Google yet, so it has no location or hours."
+      : `${pending} places haven't been looked up on Google yet, so they have no location or hours.`;
     $("status").textContent = `${state.lastCount ?? 0} places · ${where}` + (closedCount ? ` · ${closedCount} closed hidden` : "") +
       (state.updating ? " · updating…" : "");
     const problem = [state.listNote, state.hereError, state.timesError].filter(Boolean).join(" ");
@@ -1230,6 +1242,27 @@
 
   document.querySelectorAll("[data-view]").forEach((b) =>
     b.addEventListener("click", () => setView(b.dataset.view)));
+
+  // "Look up now": ask the script to look the waiting places up on Google, then reload the list.
+  $("pending-go").addEventListener("click", async () => {
+    const btn = $("pending-go");
+    btn.disabled = true;
+    btn.textContent = "Looking up…";
+    try {
+      const result = await postScript(loadJSON(CONFIG_KEY), { action: "fill" });
+      await load();
+      if (result.remaining) {
+        state.listNote = `Looked up ${result.looked}. ${result.remaining} more are being looked up in the background; tap Refresh in a few minutes.`;
+        updateStatus();
+      }
+    } catch (err) {
+      state.listNote = err.message;
+      updateStatus();
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Look up now";
+    }
+  });
 
   $("refresh").addEventListener("click", load);
   $("reconnect-btn").addEventListener("click", showSetup);

@@ -35,6 +35,7 @@ function doPost(e) {
   if (!key || body.key !== key) return json_({ error: 'bad-key' });
   try {
     if (body.action === 'visit') return json_(saveVisit_(body));
+    if (body.action === 'fill') return json_(quickFill_(QUICK_FILL_MAX));
     return json_({ error: 'bad-request' });
   } catch (err) {
     return json_({ error: String(err) });
@@ -161,6 +162,45 @@ function fillMissing() {
 }
 
 function continueFill() { fillMissing(); }
+
+const QUICK_FILL_MAX = 20; // few enough to answer the phone in a few seconds, under the per-minute quota
+
+/**
+ * "Look up now" from the phone: looks up to `max` waiting places on Google right
+ * away. Anything beyond that carries on in the background a minute later.
+ */
+function quickFill_(max) {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(15000)) return { error: 'busy' };
+  try {
+    const apiKey = PropertiesService.getScriptProperties().getProperty('MAPS_KEY');
+    if (!apiKey) return { error: 'MAPS_KEY is missing from Script Properties.' };
+    const places = readSourcePlaces_();
+    const data = readAppData_();
+    const waiting = (list) => list.filter(p => needsLookup_(p, data.get(p.key)));
+    const now = waiting(places).slice(0, max);
+    if (now.length) {
+      if (!spend_('textSearch', now.length)) return { error: 'monthly-limit' };
+      for (let i = 0; i < now.length; i += BATCH) {
+        const batch = now.slice(i, i + BATCH);
+        const res = UrlFetchApp.fetchAll(batch.map(p => searchRequest_(p, apiKey)));
+        batch.forEach((p, j) => {
+          const rec = toRecord_(p, res[j].getResponseCode(), res[j].getContentText());
+          if (rec.status !== 'retry') data.set(p.key, carryVisit_(rec, data.get(p.key)));
+        });
+      }
+      writeAppData_(data, places);
+    }
+    const remaining = waiting(places).length;
+    if (remaining) {
+      deleteTriggers_('continueFill');
+      ScriptApp.newTrigger('continueFill').timeBased().after(60 * 1000).create();
+    }
+    return { ok: true, looked: now.length, remaining };
+  } finally {
+    lock.releaseLock();
+  }
+}
 
 /** Runs at 3 am: look up new rows, then refresh the oldest hours. */
 function nightlyFill() {
@@ -684,6 +724,7 @@ function withAppData_(places, data) {
       locs: locs.filter(l => l.status !== 'CLOSED_PERMANENTLY')
         .map(l => ({ lat: l.lat, lng: l.lng, addr: l.addr, maps: l.maps, hours: l.hours || [] })),
       visit: visitOf_(rec),
+      pending: needsLookup_(p, rec), // not looked up on Google yet (new row, or its name/neighborhood changed)
     });
   });
 }
