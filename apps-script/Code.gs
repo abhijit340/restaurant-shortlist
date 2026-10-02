@@ -51,8 +51,11 @@ function doGet(e) {
     if (e.parameter.action === 'times') return json_(travelTimes_(e.parameter.from, e.parameter.to, e.parameter.when));
     if (e.parameter.action === 'geocode') return json_(geocode_(e.parameter.q));
     if (e.parameter.action === 'find') return json_(findPlaces_(e.parameter.q));
+    const places = withAppData_(readAllPlaces_(), readAppData_());
     return json_({
-      places: withAppData_(readAllPlaces_(), readAppData_()),
+      places,
+      // Anything that needs a human's attention (empty when all is well).
+      health: healthFrom_(PropertiesService.getScriptProperties().getProperties(), places, new Date()),
       // The browser map key (locked to the app's web address and to Maps JavaScript only).
       mapsKey: PropertiesService.getScriptProperties().getProperty('MAPS_BROWSER_KEY') || '',
       loadedAt: new Date().toISOString(),
@@ -133,6 +136,7 @@ function fillMissing() {
       if (!spend_('textSearch', batch.length)) { stopReason = 'limit'; break; }
       const t0 = Date.now();
       const responses = UrlFetchApp.fetchAll(batch.map(p => searchRequest_(p, apiKey)));
+      watch_('place lookup', responses[0]);
       let rateLimited = false;
       batch.forEach((p, j) => {
         const rec = toRecord_(p, responses[j].getResponseCode(), responses[j].getContentText());
@@ -187,6 +191,7 @@ function quickFill_(max) {
       for (let i = 0; i < now.length; i += BATCH) {
         const batch = now.slice(i, i + BATCH);
         const res = UrlFetchApp.fetchAll(batch.map(p => searchRequest_(p, apiKey)));
+        watch_('place lookup', res[0]);
         batch.forEach((p, j) => {
           const rec = toRecord_(p, res[j].getResponseCode(), res[j].getContentText());
           if (rec.status !== 'retry') data.set(p.key, carryVisit_(rec, data.get(p.key)));
@@ -207,8 +212,80 @@ function quickFill_(max) {
 
 /** Runs at 3 am: look up new rows, then refresh the oldest hours. */
 function nightlyFill() {
-  fillMissing();
-  refreshStale_(REFRESH_PER_NIGHT, REFRESH_AFTER_DAYS);
+  try {
+    fillMissing();
+    refreshStale_(REFRESH_PER_NIGHT, REFRESH_AFTER_DAYS);
+    setHealth_('nightly', { ok: true });
+  } catch (err) {
+    setHealth_('nightly', { ok: false, msg: String(err).slice(0, 200) });
+    throw err;
+  }
+}
+
+// ---------- Health: things that need a human's attention ----------
+
+const SKU_LABELS = { textSearch: 'Place lookups', placeDetails: 'Hours refreshes', matrixTransit: 'Transit times',
+  matrixWalk: 'Walking times', geocode: 'Typed-place lookups' };
+
+function setHealth_(name, value) {
+  PropertiesService.getScriptProperties().setProperty('health:' + name, JSON.stringify(Object.assign({ at: Date.now() }, value)));
+}
+
+/**
+ * Remembers when Google refuses a request (bad key, billing off, API disabled…),
+ * and forgets it once the same kind of request works again. 429 (too fast) and
+ * 404 (a retired place ID) are normal and ignored.
+ */
+function watch_(service, res) {
+  const code = res.getResponseCode();
+  const props = PropertiesService.getScriptProperties();
+  if (code === 200) {
+    const last = props.getProperty('health:apiError');
+    if (last && JSON.parse(last).service === service) props.deleteProperty('health:apiError');
+    return;
+  }
+  if (code === 429 || code === 404) return;
+  let msg = '';
+  try { msg = JSON.parse(res.getContentText()).error.message; } catch (e) { /* not JSON */ }
+  setHealth_('apiError', { service, code, msg: String(msg).slice(0, 160) });
+}
+
+/**
+ * The list of problems worth showing in the app, in plain words. Pure, testable:
+ * props = all Script Properties, places = what the app is about to receive.
+ */
+function healthFrom_(props, places, now) {
+  const out = [];
+  const read = (key) => { try { return JSON.parse(props[key] || 'null'); } catch (e) { return null; } };
+  const daysAgo = (ms) => (now.getTime() - ms) / 86400000;
+  const day = (ms) => Utilities.formatDate(new Date(ms), 'America/Los_Angeles', 'MMM d');
+
+  if (!places.length) {
+    out.push('The script found no places. Check that the restaurant tab and its section headings ("To Try", "would recommend / want to return") still have exactly those names.');
+  } else if (!places.some(p => p.section === 'try' && !p.added)) {
+    out.push('The "To Try" heading wasn\'t found in the restaurant tab, so those places are missing. Check its spelling.');
+  }
+
+  const month = Utilities.formatDate(now, 'America/Los_Angeles', 'yyyy-MM');
+  for (const sku of Object.keys(MONTHLY_LIMITS)) {
+    const used = Number(props['usage:' + month + ':' + sku] || 0);
+    if (used >= MONTHLY_LIMITS[sku]) out.push(SKU_LABELS[sku] + ' have hit this month\'s safety cap and are paused until next month.');
+    else if (used >= 0.9 * MONTHLY_LIMITS[sku]) out.push(SKU_LABELS[sku] + ' are at ' + Math.round(100 * used / MONTHLY_LIMITS[sku]) + '% of this month\'s safety cap.');
+  }
+
+  const api = read('health:apiError');
+  if (api && daysAgo(api.at) < 3) {
+    out.push('Google refused a ' + api.service + ' request on ' + day(api.at) + ' (' + api.code + (api.msg ? ': ' + api.msg : '') +
+      '). Check in Google Cloud that billing is active and the API key is still valid.');
+  }
+
+  const nightly = read('health:nightly');
+  if (nightly && !nightly.ok) {
+    out.push('The overnight update failed on ' + day(nightly.at) + ' (' + nightly.msg + ').');
+  } else if (nightly && daysAgo(nightly.at) > 3) {
+    out.push('The overnight update hasn\'t run since ' + day(nightly.at) + '. In Apps Script, open Triggers and check "nightlyFill" is still there; running "Fill missing info" from the Sheet\'s menu sets it up again.');
+  }
+  return out;
 }
 
 // ---------- Monthly refresh: hours, closures, new chain branches ----------
@@ -247,6 +324,7 @@ function refreshStale_(limit, minAgeDays) {
       const res = UrlFetchApp.fetchAll(
         byId.map(r => detailsRequest_(r.locs[0].id, apiKey))
           .concat(bySearch.map(r => searchRequest_(byKey.get(r.key), apiKey))));
+      watch_('hours refresh', res[0]);
       byId.forEach((r, j) => {
         data.set(r.key, refreshFromDetails_(r, res[j].getResponseCode(), res[j].getContentText()));
       });
@@ -315,8 +393,9 @@ function travelTimes_(from, to, when) {
   if (!spend_('matrixWalk', dests.length)) return { error: 'monthly-limit' };
 
   const depart = departureTime_(when, new Date());
-  const [walk, transit] = UrlFetchApp.fetchAll(['WALK', 'TRANSIT'].map(mode => matrixRequest_(origin, dests, mode, apiKey, depart)))
-    .map(res => parseMatrix_(res.getResponseCode(), res.getContentText(), dests.length));
+  const answers = UrlFetchApp.fetchAll(['WALK', 'TRANSIT'].map(mode => matrixRequest_(origin, dests, mode, apiKey, depart)));
+  watch_('travel time', answers[1]);
+  const [walk, transit] = answers.map(res => parseMatrix_(res.getResponseCode(), res.getContentText(), dests.length));
   return { walk, transit };
 }
 
@@ -359,7 +438,10 @@ function geocode_(q) {
   const url = 'https://maps.googleapis.com/maps/api/geocode/json?address=' + encodeURIComponent(q) +
     '&bounds=47.2,-122.7%7C48.0,-121.9&region=us&key=' + apiKey;
   const res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
-  return parseGeocode_(res.getResponseCode(), res.getContentText());
+  const answer = parseGeocode_(res.getResponseCode(), res.getContentText());
+  // Geocoding reports a refused request inside a normal answer, so record it by hand.
+  if (answer.error && answer.error !== 'not-found') setHealth_('apiError', { service: 'typed-place lookup', code: answer.error, msg: '' });
+  return answer;
 }
 
 function parseGeocode_(code, body) {
@@ -693,6 +775,7 @@ function findPlaces_(q) {
     headers: { 'X-Goog-Api-Key': apiKey, 'X-Goog-FieldMask': PLACE_FIELDS },
     payload: JSON.stringify({ textQuery: q, pageSize: 5, locationBias: { circle: { center: SEATTLE, radius: 50000 } } }),
   });
+  watch_('place search', res);
   if (res.getResponseCode() !== 200) return { error: 'search failed (' + res.getResponseCode() + ')' };
   const found = (JSON.parse(res.getContentText()).places || []).filter(g => g.location);
   return { candidates: found.map(compactLoc_) };

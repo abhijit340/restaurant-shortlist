@@ -108,6 +108,11 @@
     }
     .candidate b { display: block; }
     .candidate span { color: var(--muted); font-size: .85rem; }
+    #health { border-color: var(--warn); }
+    #health strong { color: var(--warn); }
+    #health ul { margin: 8px 0 0; padding-left: 20px; }
+    #health li { margin: 4px 0; font-size: .92rem; }
+    #health a { color: inherit; }
     .visit-btn {
       margin-top: 10px; padding: 8px 12px; font-size: .85rem; font-weight: 500; border-radius: 999px;
       background: var(--card); color: var(--text); border: 1px solid var(--border);
@@ -206,6 +211,13 @@
     <div id="map-card"></div>
   </div>
 
+  <!-- Shown when the script reports something that needs fixing. -->
+  <div class="card" id="health" hidden>
+    <strong>⚠️ Needs attention</strong>
+    <ul id="health-list"></ul>
+    <p class="hint">See <a href="help.html">Help</a> for what to do.</p>
+  </div>
+
   <!-- Shown when the Sheet has places Google hasn't been asked about yet. -->
   <div class="card" id="pending" hidden>
     <span id="pending-text"></span>
@@ -217,7 +229,7 @@
   <button id="more" hidden>Show more</button>
 
   <footer>
-    v0.25 · <a href="help.html">Help</a> · <a href="colors.html">Colors</a><span id="reconnect" hidden> · <button class="link" id="share">Share setup link</button> · <button class="link" id="reconnect-btn">Change Sheet connection</button></span>
+    v0.26 · <a href="help.html">Help</a> · <a href="colors.html">Colors</a><span id="reconnect" hidden> · <button class="link" id="share">Share setup link</button> · <button class="link" id="reconnect-btn">Change Sheet connection</button></span>
   </footer>
 </main>
 
@@ -396,6 +408,7 @@
   function useList(d) {
     state.places = d.places;
     state.mapsKey = d.mapsKey || "";
+    state.health = d.health || [];
     for (const p of state.places) {
       p.dealWindows = Deals.parseDeals(p.deals).windows;
       p.inkind = /\binkind\b/i.test(`${p.deals} ${p.desc}`); // inKind dining credit accepted
@@ -941,6 +954,9 @@
         : `travel times for the nearest ${state.timedCount ?? TIMED}`;
       if (here.acc > 100) where += ` (location ±${Math.round(here.acc)} m)`;
     }
+    $("health").hidden = !(state.health && state.health.length);
+    $("health-list").replaceChildren(...(state.health || []).map((line) => el("li", "", line)));
+
     // New rows in the Sheet show up at once, but need a Google lookup for location and hours.
     const pending = state.offline ? 0 : state.places.filter((p) => p.pending).length;
     $("pending").hidden = !pending;
