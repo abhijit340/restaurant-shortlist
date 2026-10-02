@@ -57,6 +57,15 @@ class Handler(SimpleHTTPRequestHandler):
             body = {"error": "bad-key"}
         elif params.get("action") == ["times"]:
             body = fake_times(params)
+        elif params.get("action") == ["find"]:
+            q = params.get("q", [""])[0]
+            body = {"candidates": [] if q.lower() == "nowhere" else [
+                {"id": "fake-1", "name": q.title(), "addr": "800 Example Ave, Seattle", "lat": 47.6125, "lng": -122.3365,
+                 "cuisine": "Ramen restaurant", "status": "OPERATIONAL", "maps": "https://maps.google.com/?q=47.6125,-122.3365",
+                 "utc": -420, "hours": [[d, 1100, d, 2200] for d in range(7)]},
+                {"id": "fake-2", "name": q.title() + " (Eastside)", "addr": "900 Example Way, Bellevue", "lat": 47.6101, "lng": -122.2015,
+                 "cuisine": "Ramen restaurant", "status": "OPERATIONAL", "maps": "", "utc": -420, "hours": []},
+            ]}
         elif params.get("action") == ["geocode"]:
             # Any text "finds" a fixed spot on Capitol Hill, except "nowhere".
             q = params.get("q", [""])[0]
@@ -67,6 +76,7 @@ class Handler(SimpleHTTPRequestHandler):
             for place in body["places"]:
                 place["visit"] = VISITS.get(place["key"])
                 place["pending"] = place["key"] in PENDING
+            body["places"] += ADDED
         self.send_json(body)
 
     def do_POST(self):
@@ -76,6 +86,18 @@ class Handler(SimpleHTTPRequestHandler):
         req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
         if req.get("key") != "test":
             body = {"error": "bad-key"}
+        elif req.get("action") == "add":
+            key = " ".join(req.get("name", "").lower().split())
+            listed = {p["key"] for p in json.loads((ROOT / "tests" / "mock_exec.json").read_text(encoding="utf-8"))["places"]}
+            if key in listed or any(p["key"] == key for p in ADDED):
+                body = {"error": "already-listed"}
+            else:
+                loc = req.get("loc")
+                ADDED.append({"key": key, "name": req["name"].strip(), "section": "try", "row": "added", "desc": req.get("desc", ""),
+                              "hood": req.get("hood", ""), "deals": req.get("deals", ""), "menu": "", "tags": [], "fav": False,
+                              "struck": False, "added": True, "cuisine": (loc or {}).get("cuisine", ""),
+                              "closed": "open" if loc else "", "locs": [loc] if loc else [], "visit": None, "pending": not loc})
+                body = {"ok": True, "key": key}
         elif req.get("action") == "fill":
             looked = len(PENDING)
             PENDING.clear()  # pretend Google was asked about every waiting place
@@ -104,6 +126,7 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 VISITS = {}  # place key -> visit, for the fake script
+ADDED = []   # places "added from the app", for the fake script
 PENDING = {"unplaced bakery"}  # places "not looked up yet", until the app asks for a lookup
 
 

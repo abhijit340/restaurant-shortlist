@@ -66,8 +66,8 @@ const g = (name, lat, status = 'OPERATIONAL', periods = []) => ({
   const code = await (await fetch('../apps-script/Code.gs')).text();
   const { parseSheet, buildQuery_, toRecord_, namesMatch_, overallStatus_, needsLookup_, withAppData_, parseMatrix_, parseLatLng_,
     pickStale_, refreshFromDetails_, refreshFromSearch_, departureTime_, matrixRequest_, parseGeocode_,
-    rowsToData_, dataToRows_, applyVisit_, visitOf_, carryVisit_, DATA_HEADERS } =
-    new Function(code + '\nreturn { parseSheet, buildQuery_, toRecord_, namesMatch_, overallStatus_, needsLookup_, withAppData_, parseMatrix_, parseLatLng_, pickStale_, refreshFromDetails_, refreshFromSearch_, departureTime_, matrixRequest_, parseGeocode_, rowsToData_, dataToRows_, applyVisit_, visitOf_, carryVisit_, DATA_HEADERS };')();
+    rowsToData_, dataToRows_, applyVisit_, visitOf_, carryVisit_, DATA_HEADERS, parseAdded_, cleanLoc_, safeCell_ } =
+    new Function(code + '\nreturn { parseSheet, buildQuery_, toRecord_, namesMatch_, overallStatus_, needsLookup_, withAppData_, parseMatrix_, parseLatLng_, pickStale_, refreshFromDetails_, refreshFromSearch_, departureTime_, matrixRequest_, parseGeocode_, rowsToData_, dataToRows_, applyVisit_, visitOf_, carryVisit_, DATA_HEADERS, parseAdded_, cleanLoc_, safeCell_ };')();
   const places = parseSheet(SYNTHETIC);
   const find = (k) => places.find(p => p.key === k);
 
@@ -209,6 +209,31 @@ const g = (name, lat, status = 'OPERATIONAL', periods = []) => ({
     ['visit: survives a fresh Google lookup', carryVisit_({ status: 'ok', locs: [] }, visited).verdict === 'Loved'],
     ['visit: a rate-limited lookup is left alone', !('verdict' in carryVisit_({ status: 'retry' }, visited))],
     ['visit: app gets it with the place', withAppData_([P('Echo Eatery')], new Map([['echo eatery', visited]]))[0].visit.verdict === 'Loved'],
+  );
+
+  // ----- Add a place from the phone -----
+  const addedRows = [
+    ['Kilo Kitchen', 'https://kilo.example/menu', 'ramen', 'fremont', 'HH 4-6', '2026-10-02'],
+    ['  ', '', '', '', '', ''],
+    ['Alpha Diner', '', 'already in the main tab', '', '', '2026-10-02'],
+    ['kilo  kitchen!', '', 'typed twice', '', '', '2026-10-02'],
+    ['Lima Lounge', 'not a link', '', '', '', '2026-10-02'],
+  ];
+  const addedPlaces = parseAdded_(addedRows, new Set(['alpha diner']));
+  const sent = { id: 'abc', name: 'Kilo Kitchen', addr: '1 St', lat: '47.61', lng: -122.33, cuisine: 'Ramen', status: 'OPERATIONAL',
+    maps: 'https://maps.example/x', utc: -420, hours: [[1, 1100, 1, 2200], ['x'], [1, 2, 3, 4, 5]], extra: 'ignored' };
+  checks.push(
+    ['add: rows become "To Try" places marked added', addedPlaces.length === 2 && addedPlaces[0].section === 'try' && addedPlaces[0].added === true],
+    ['add: fields land in the right places', addedPlaces[0].hood === 'fremont' && addedPlaces[0].deals === 'HH 4-6' && addedPlaces[0].menu === 'https://kilo.example/menu'],
+    ['add: main tab wins over a duplicate', !addedPlaces.some(p => p.key === 'alpha diner')],
+    ['add: same place typed twice is shown once', addedPlaces.filter(p => p.key === 'kilo kitchen').length === 1],
+    ['add: blank rows skipped, non-link menu dropped', addedPlaces[1].name === 'Lima Lounge' && addedPlaces[1].menu === ''],
+    ['add: row label says which tab', addedPlaces[0].row === 'added 2' && addedPlaces[1].row === 'added 6'],
+    ['add: picked match is reduced to known fields', JSON.stringify(Object.keys(cleanLoc_(sent))) === '["id","name","addr","lat","lng","cuisine","status","maps","utc","hours"]'],
+    ['add: numbers are numbers, bad hours dropped', cleanLoc_(sent).lat === 47.61 && JSON.stringify(cleanLoc_(sent).hours) === '[[1,1100,1,2200]]'],
+    ['add: nonsense location rejected', cleanLoc_({ lat: 'x', lng: 1 }) === null && cleanLoc_({ lat: 95, lng: 1 }) === null && cleanLoc_(null) === null],
+    ['add: non-https map link dropped', cleanLoc_({ lat: 1, lng: 1, maps: 'javascript:alert(1)' }).maps === ''],
+    ['add: formula-looking text is stored as text', safeCell_('=IMPORTRANGE("x")') === "'=IMPORTRANGE(\"x\")" && safeCell_('+1 pasta') === "'+1 pasta" && safeCell_('HH 4-6') === 'HH 4-6'],
   );
 
   // ----- Deals reader (deals.js), with made-up wording -----

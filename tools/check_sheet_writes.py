@@ -9,8 +9,10 @@ and tools/deploy_script.ps1 refuses to publish, unless:
  2. That function only calls read methods on it (get…), nothing that writes,
     clears, deletes, inserts, sorts, or moves.
  3. No other code can reach the tab indirectly: sheets are only ever opened by
-    the names SOURCE_TAB or DATA_TAB (no getSheets(), getActiveSheet(), …).
+    the names SOURCE_TAB, DATA_TAB, or ADDED_TAB (no getSheets(), getActiveSheet(), …).
  4. Nothing deletes or renames whole tabs.
+ 5. Code that touches ADDED_TAB (places added from the phone) may add rows but
+    never delete, clear, sort, or move anything.
 
 Run from the project root:  python tools/check_sheet_writes.py
 """
@@ -28,6 +30,8 @@ WRITES = re.compile(
     r"splitTextToColumns|removeDuplicates|createFilter|applyRowBanding|applyColumnBanding)\s*\(")
 # Ways to get hold of a sheet without naming it.
 INDIRECT = re.compile(r"\.(getSheets|getActiveSheet|getSheetById|getActiveRange|getActiveCell|getRangeByName|getNamedRanges)\s*\(")
+# What code touching the added-from-app tab must never do (adding rows is fine).
+REMOVALS = re.compile(r"\.(clear\w*|delete\w*|remove\w*|move\w*|sort|randomize|removeDuplicates)\s*\(")
 TAB_LEVEL = re.compile(r"\.(deleteSheet|deleteActiveSheet|renameActiveSheet|setActiveSheet|duplicateActiveSheet)\s*\(")
 
 
@@ -67,8 +71,11 @@ def main() -> int:
         for bad in TAB_LEVEL.findall(body):
             problems.append(f"{name} calls .{bad}(): deleting or renaming tabs is not allowed.")
         for arg in re.findall(r"getSheetByName\(\s*([^)]*?)\s*\)", body):
-            if arg not in ("SOURCE_TAB", "DATA_TAB"):
-                problems.append(f"{name} opens a sheet by {arg!r}: only SOURCE_TAB (read) and DATA_TAB are allowed.")
+            if arg not in ("SOURCE_TAB", "DATA_TAB", "ADDED_TAB"):
+                problems.append(f"{name} opens a sheet by {arg!r}: only SOURCE_TAB (read), DATA_TAB, and ADDED_TAB are allowed.")
+        if "ADDED_TAB" in body:
+            for bad in REMOVALS.findall(body):
+                problems.append(f"{name} touches ADDED_TAB and calls .{bad}(): that tab is add-rows-only.")
 
     # SOURCE_TAB outside any function: only its own definition is allowed.
     outside = code

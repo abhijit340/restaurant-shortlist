@@ -102,6 +102,12 @@
     .chip.fav { background: var(--fav-bg); color: var(--fav); }
     .chip.warn { background: var(--chip); color: var(--error); }
     .chip.visited { background: var(--fav-bg); color: var(--fav); }
+    .candidate {
+      display: block; width: 100%; text-align: left; margin-top: 8px; padding: 10px 12px; font-size: .95rem; font-weight: 400;
+      border-radius: 10px; background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    }
+    .candidate b { display: block; }
+    .candidate span { color: var(--muted); font-size: .85rem; }
     .visit-btn {
       margin-top: 10px; padding: 8px 12px; font-size: .85rem; font-weight: 500; border-radius: 999px;
       background: var(--card); color: var(--text); border: 1px solid var(--border);
@@ -184,6 +190,7 @@
     <div class="row">
       <button class="toggle" data-view="list" aria-pressed="true">☰ List</button>
       <button class="toggle" data-view="map" aria-pressed="false">🗺 Map</button>
+      <button class="toggle" id="add-open" style="margin-left:auto">＋ Add a place</button>
     </div>
   </div>
 
@@ -210,7 +217,7 @@
   <button id="more" hidden>Show more</button>
 
   <footer>
-    v0.24 · <a href="help.html">Help</a> · <a href="colors.html">Colors</a><span id="reconnect" hidden> · <button class="link" id="share">Share setup link</button> · <button class="link" id="reconnect-btn">Change Sheet connection</button></span>
+    v0.25 · <a href="help.html">Help</a> · <a href="colors.html">Colors</a><span id="reconnect" hidden> · <button class="link" id="share">Share setup link</button> · <button class="link" id="reconnect-btn">Change Sheet connection</button></span>
   </footer>
 </main>
 
@@ -235,6 +242,35 @@
       <button type="button" class="link" id="visit-remove" hidden>Remove visit</button>
     </div>
   </form>
+</dialog>
+
+<!-- Add a place: search Google, pick the match, add notes. Saved to the Sheet's "added from app" tab. -->
+<dialog id="add">
+  <strong>Add a place</strong>
+  <form id="add-search">
+    <label for="add-q">Restaurant name</label>
+    <div class="searchrow">
+      <input id="add-q" required maxlength="120" placeholder="Name (add a neighborhood if it's a common name)" autocomplete="off">
+      <button class="toggle" id="add-find">Search</button>
+    </div>
+  </form>
+  <div id="add-results"></div>
+  <form id="add-details" hidden>
+    <p class="hint" id="add-picked"></p>
+    <label for="add-name">Name on the list</label>
+    <input id="add-name" required maxlength="120" autocomplete="off">
+    <label for="add-hood">Neighborhood</label>
+    <input id="add-hood" maxlength="120" placeholder="Optional" autocomplete="off">
+    <label for="add-desc">Description</label>
+    <input id="add-desc" maxlength="300" placeholder="Optional: cuisine, why we want to go" autocomplete="off">
+    <label for="add-deals">Deals</label>
+    <input id="add-deals" maxlength="300" placeholder="Optional: HH m-f 4-6" autocomplete="off">
+    <div class="row" style="margin-top:14px; align-items:center">
+      <button id="add-save">Add to the list</button>
+    </div>
+  </form>
+  <p class="error" id="add-error" hidden></p>
+  <div class="row" style="margin-top:10px"><button type="button" class="link" id="add-cancel">Cancel</button></div>
 </dialog>
 
 <script src="themes.js"></script>
@@ -325,6 +361,7 @@
       "not-found": "Couldn't find that place. Try adding a street, neighborhood, or city.",
       "busy": "The Sheet is busy with an update right now. Try again in a few minutes.",
       "no-such-place": "That place isn't in the Sheet any more. Tap Refresh.",
+      "already-listed": "That place is already on the list.",
     };
     const err = new Error(messages[data.error] || "The Sheet's script had a problem: " + data.error);
     err.code = data.error;
@@ -958,6 +995,7 @@
 
     const chips = el("div", "chips");
     if (p.visit) chips.append(el("span", "chip visited", `✓ Visited · ${p.visit.verdict}`));
+    if (p.added) chips.append(el("span", "chip", "📱 Added in app"));
     if (p.section === "recommend") chips.append(el("span", "chip star", "⭐ Been & loved"));
     if (p.fav) chips.append(el("span", "chip fav", "💚 Favorite"));
     if (p.inkind) chips.append(el("span", "chip fav", "💳 inKind"));
@@ -970,6 +1008,88 @@
     c.append(visit);
     return c;
   }
+
+  // ---------- Add a place ----------
+
+  let adding = null; // the Google match picked for the new place (null = add by name only)
+
+  function addError(msg) {
+    $("add-error").textContent = msg || "";
+    $("add-error").hidden = !msg;
+  }
+
+  $("add-open").addEventListener("click", () => {
+    $("add-q").value = "";
+    $("add-results").replaceChildren();
+    $("add-details").hidden = true;
+    addError("");
+    $("add").showModal();
+  });
+  $("add-cancel").addEventListener("click", () => $("add").close());
+
+  // Step 1: search Google and list the matches.
+  $("add-search").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const q = $("add-q").value.trim();
+    const btn = $("add-find");
+    btn.disabled = true;
+    addError("");
+    $("add-details").hidden = true;
+    $("add-results").replaceChildren(el("p", "hint", "Searching…"));
+    try {
+      const data = await callScript(loadJSON(CONFIG_KEY), `&action=find&q=${encodeURIComponent(q)}`);
+      const out = $("add-results");
+      out.replaceChildren(el("p", "hint", data.candidates.length ? "Which one is it?" : "Google didn't find a match."));
+      for (const c of data.candidates) {
+        const b = el("button", "candidate");
+        b.type = "button";
+        b.append(el("b", "", c.name), el("span", "", [c.cuisine, c.addr].filter(Boolean).join(" · ")));
+        b.addEventListener("click", () => pickCandidate(c, q));
+        out.append(b);
+      }
+      const none = el("button", "link", "None of these: add it by name only");
+      none.type = "button";
+      none.addEventListener("click", () => pickCandidate(null, q));
+      out.append(none);
+    } catch (err) {
+      $("add-results").replaceChildren();
+      addError(err.message);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  // Step 2: confirm the name and add notes.
+  function pickCandidate(c, typed) {
+    adding = c;
+    $("add-results").replaceChildren();
+    $("add-picked").textContent = c ? `${c.name} · ${c.addr}` : "No Google match picked. It will be looked up by name later.";
+    $("add-name").value = c ? c.name : typed;
+    $("add-hood").value = "";
+    $("add-desc").value = c ? c.cuisine : "";
+    $("add-deals").value = "";
+    $("add-details").hidden = false;
+    $("add-name").focus();
+  }
+
+  $("add-details").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const btn = $("add-save");
+    btn.disabled = true;
+    addError("");
+    try {
+      await postScript(loadJSON(CONFIG_KEY), {
+        action: "add", name: $("add-name").value, hood: $("add-hood").value,
+        desc: $("add-desc").value, deals: $("add-deals").value, loc: adding,
+      });
+      $("add").close();
+      await load();
+    } catch (err) {
+      addError(err.message);
+    } finally {
+      btn.disabled = false;
+    }
+  });
 
   // ---------- Mark visited ----------
 

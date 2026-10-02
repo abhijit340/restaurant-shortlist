@@ -7,6 +7,7 @@
 
 const SOURCE_TAB = 'Seattle dining';
 const DATA_TAB = 'app data'; // managed by this script; the source tab is never written
+const ADDED_TAB = 'added from app'; // places added from the phone; the script only ever adds rows here
 const COLS = 5; // Name, menu/website, description, neighborhood, deals?
 
 // Hard monthly caps, about 90% of Google's free allowances (checked 2026-09-30).
@@ -36,6 +37,7 @@ function doPost(e) {
   try {
     if (body.action === 'visit') return json_(saveVisit_(body));
     if (body.action === 'fill') return json_(quickFill_(QUICK_FILL_MAX));
+    if (body.action === 'add') return json_(addPlace_(body));
     return json_({ error: 'bad-request' });
   } catch (err) {
     return json_({ error: String(err) });
@@ -48,8 +50,9 @@ function doGet(e) {
   try {
     if (e.parameter.action === 'times') return json_(travelTimes_(e.parameter.from, e.parameter.to, e.parameter.when));
     if (e.parameter.action === 'geocode') return json_(geocode_(e.parameter.q));
+    if (e.parameter.action === 'find') return json_(findPlaces_(e.parameter.q));
     return json_({
-      places: withAppData_(readSourcePlaces_(), readAppData_()),
+      places: withAppData_(readAllPlaces_(), readAppData_()),
       // The browser map key (locked to the app's web address and to Maps JavaScript only).
       mapsKey: PropertiesService.getScriptProperties().getProperty('MAPS_BROWSER_KEY') || '',
       loadedAt: new Date().toISOString(),
@@ -70,7 +73,7 @@ function showAppSetup() {
     props.setProperty('KEY', key);
   }
   Logger.log('Key for the app: ' + key);
-  Logger.log('Places found: ' + readSourcePlaces_().length);
+  Logger.log('Places found: ' + readAllPlaces_().length);
 }
 
 /** Run if the key ever leaks: the old key stops working, then run showAppSetup. */
@@ -118,7 +121,7 @@ function fillMissing() {
     const apiKey = PropertiesService.getScriptProperties().getProperty('MAPS_KEY');
     if (!apiKey) throw new Error('MAPS_KEY is missing from Script Properties.');
 
-    places = readSourcePlaces_();
+    places = readAllPlaces_();
     data = readAppData_();
     recheckNames_(data);
     const todo = places.filter(p => needsLookup_(p, data.get(p.key)));
@@ -175,7 +178,7 @@ function quickFill_(max) {
   try {
     const apiKey = PropertiesService.getScriptProperties().getProperty('MAPS_KEY');
     if (!apiKey) return { error: 'MAPS_KEY is missing from Script Properties.' };
-    const places = readSourcePlaces_();
+    const places = readAllPlaces_();
     const data = readAppData_();
     const waiting = (list) => list.filter(p => needsLookup_(p, data.get(p.key)));
     const now = waiting(places).slice(0, max);
@@ -228,7 +231,7 @@ function refreshStale_(limit, minAgeDays) {
   try {
     const apiKey = PropertiesService.getScriptProperties().getProperty('MAPS_KEY');
     if (!apiKey) throw new Error('MAPS_KEY is missing from Script Properties.');
-    const places = readSourcePlaces_();
+    const places = readAllPlaces_();
     const byKey = new Map(places.map(p => [p.key, p]));
     const data = readAppData_();
     const due = pickStale_(places, data, new Date(), minAgeDays, limit);
@@ -402,6 +405,38 @@ function usageKey_(sku) { return 'usage:' + month_() + ':' + sku; }
 function month_() { return Utilities.formatDate(new Date(), 'America/Los_Angeles', 'yyyy-MM'); }
 
 // ---------- Reading the tab ----------
+
+/** Every place the app shows: the human-edited tab, plus places added from the phone. */
+function readAllPlaces_() {
+  const main = readSourcePlaces_();
+  return main.concat(parseAdded_(readAddedRows_(), new Set(main.map(p => p.key))));
+}
+
+function readAddedRows_() {
+  const sheet = SpreadsheetApp.getActive().getSheetByName(ADDED_TAB);
+  if (!sheet || sheet.getLastRow() < 2) return [];
+  return sheet.getRange(2, 1, sheet.getLastRow() - 1, ADDED_HEADERS.length).getDisplayValues();
+}
+
+/**
+ * Rows of the "added from app" tab → places in the "To Try" section. A place that
+ * is also in the main tab is skipped here (the main tab wins), so copying a row
+ * across by hand doesn't show it twice. Pure, testable.
+ */
+function parseAdded_(rows, taken) {
+  const out = [];
+  rows.forEach((r, i) => {
+    const [name, menu, desc, hood, deals] = r.map(v => String(v || '').trim());
+    const key = normKey_(name);
+    if (!key || taken.has(key)) return;
+    taken.add(key);
+    out.push({
+      key, name, section: 'try', row: 'added ' + (i + 2), desc, hood, deals,
+      menu: /^https?:\/\//i.test(menu) ? menu : '', tags: [], fav: false, struck: false, added: true,
+    });
+  });
+  return out;
+}
 
 function readSourcePlaces_() {
   const sheet = SpreadsheetApp.getActive().getSheetByName(SOURCE_TAB);
@@ -640,6 +675,84 @@ function refreshFromSearch_(old, fresh) {
   return carryVisit_(fresh, old);
 }
 
+// ---------- Add a place from the phone ----------
+
+const ADDED_HEADERS = ['Name', 'menu/website', 'description', 'neighborhood', 'deals?', 'Added'];
+
+/** q = a restaurant name (optionally with a neighborhood). Returns up to 5 Google matches to choose from. */
+function findPlaces_(q) {
+  q = String(q || '').trim().slice(0, 120);
+  if (!q) return { error: 'bad-request' };
+  const apiKey = PropertiesService.getScriptProperties().getProperty('MAPS_KEY');
+  if (!apiKey) return { error: 'MAPS_KEY is missing from Script Properties.' };
+  if (!spend_('textSearch', 1)) return { error: 'monthly-limit' };
+  const res = UrlFetchApp.fetch('https://places.googleapis.com/v1/places:searchText', {
+    method: 'post',
+    contentType: 'application/json',
+    muteHttpExceptions: true,
+    headers: { 'X-Goog-Api-Key': apiKey, 'X-Goog-FieldMask': PLACE_FIELDS },
+    payload: JSON.stringify({ textQuery: q, pageSize: 5, locationBias: { circle: { center: SEATTLE, radius: 50000 } } }),
+  });
+  if (res.getResponseCode() !== 200) return { error: 'search failed (' + res.getResponseCode() + ')' };
+  const found = (JSON.parse(res.getContentText()).places || []).filter(g => g.location);
+  return { candidates: found.map(compactLoc_) };
+}
+
+/**
+ * Adds one row to the "added from app" tab (never the main tab). If the phone
+ * sent the Google match the user picked, it's saved too, so no second lookup is needed.
+ */
+function addPlace_(body) {
+  const clip = (x, n) => String(x || '').trim().slice(0, n);
+  const name = clip(body.name, 120);
+  const key = normKey_(name);
+  if (!key) return { error: 'bad-request' };
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(15000)) return { error: 'busy' };
+  try {
+    if (readAllPlaces_().some(p => p.key === key)) return { error: 'already-listed' };
+    const ss = SpreadsheetApp.getActive();
+    let sheet = ss.getSheetByName(ADDED_TAB);
+    if (!sheet) {
+      sheet = ss.insertSheet(ADDED_TAB);
+      sheet.getRange(1, 1, 1, ADDED_HEADERS.length).setValues([ADDED_HEADERS]).setFontWeight('bold');
+      sheet.setFrozenRows(1);
+    }
+    const hood = clip(body.hood, 120);
+    sheet.appendRow([name, clip(body.menu, 300), clip(body.desc, 300), hood, clip(body.deals, 300), today_()].map(safeCell_));
+
+    const loc = cleanLoc_(body.loc);
+    if (loc) {
+      const data = readAppData_();
+      data.set(key, { key, name, row: 'added', status: 'ok', query: buildQuery_({ name, hood }).text, at: today_(), locs: [loc] });
+      writeAppData_(data, readAllPlaces_());
+    }
+    return { ok: true, key };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** Text starting with = + - @ would be run as a formula by Sheets; a leading apostrophe keeps it as text. */
+function safeCell_(v) {
+  return /^[=+\-@]/.test(v) ? "'" + v : v;
+}
+
+/** The Google match sent back by the phone, reduced to the known fields with sane types (or null). */
+function cleanLoc_(loc) {
+  if (!loc || typeof loc !== 'object') return null;
+  const lat = Number(loc.lat), lng = Number(loc.lng);
+  if (!isFinite(lat) || !isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
+  const text = (x, n) => String(x || '').slice(0, n);
+  const hours = Array.isArray(loc.hours)
+    ? loc.hours.filter(h => Array.isArray(h) && h.length <= 4 && h.every(n => Number.isInteger(n))).slice(0, 30) : [];
+  return {
+    id: text(loc.id, 200), name: text(loc.name, 200), addr: text(loc.addr, 300), lat, lng,
+    cuisine: text(loc.cuisine, 100), status: text(loc.status, 40), maps: /^https:\/\//.test(loc.maps) ? text(loc.maps, 300) : '',
+    utc: Number(loc.utc) || 0, hours,
+  };
+}
+
 // ---------- Mark visited ----------
 
 const VERDICTS = ['Loved', 'Good', 'Meh'];
@@ -649,7 +762,7 @@ function saveVisit_(body) {
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(15000)) return { error: 'busy' };
   try {
-    const places = readSourcePlaces_();
+    const places = readAllPlaces_();
     const place = places.find(p => p.key === body.place);
     if (!place) return { error: 'no-such-place' };
     const data = readAppData_();
@@ -725,6 +838,7 @@ function withAppData_(places, data) {
         .map(l => ({ lat: l.lat, lng: l.lng, addr: l.addr, maps: l.maps, hours: l.hours || [] })),
       visit: visitOf_(rec),
       pending: needsLookup_(p, rec), // not looked up on Google yet (new row, or its name/neighborhood changed)
+      added: Boolean(p.added),       // came from the "added from app" tab
     });
   });
 }
