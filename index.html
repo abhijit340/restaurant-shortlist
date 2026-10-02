@@ -181,7 +181,7 @@
   <button id="more" hidden>Show more</button>
 
   <footer>
-    v0.12<span id="reconnect" hidden> · <button class="link">Change Sheet connection</button></span>
+    v0.13<span id="reconnect" hidden> · <button class="link">Change Sheet connection</button></span>
   </footer>
 </main>
 
@@ -304,6 +304,7 @@
       return;
     }
     state.places = data.value.places;
+    state.mapsKey = data.value.mapsKey || "";
     for (const p of state.places) {
       p.dealWindows = Deals.parseDeals(p.deals).windows;
       p.inkind = /\binkind\b/i.test(`${p.deals} ${p.desc}`); // inKind dining credit accepted
@@ -526,36 +527,125 @@
     if (mapMode) showMap(list);
   }
 
-  // ---------- Map view (Leaflet + OpenStreetMap; loaded only when first opened) ----------
+  // ---------- Map view (loaded only when first opened) ----------
+  // Google's map when the Sheet's script supplies a browser key; otherwise a free
+  // OpenStreetMap map (Leaflet). Both show the same pins and behave the same.
 
   const LEAFLET = "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min";
   const PIN = { boost: "#e0a100", open: "#1f6f5c", closed: "#9a9a94", you: "#2b6fd6" };
-  let map = null, pinLayer = null, leafletLoading = null, mapCenteredOn = null;
+  const SEATTLE = { lat: 47.6062, lng: -122.3321 };
+  let map = null, mapLoading = null, mapCenteredOn = null;
+  let pinLayer = null;   // Leaflet's pins
+  let gMarkers = [];     // Google's pins
+
+  // ?gmaps tries Google's map without a key (it works, with a "development" watermark), for testing.
+  const useGoogle = () => Boolean(state.mapsKey) || params.has("gmaps");
+
+  function addScript(src) {
+    return new Promise((ok, fail) => {
+      const js = document.createElement("script");
+      js.src = src; js.onload = ok; js.onerror = () => fail(new Error("map library didn't load"));
+      document.head.append(js);
+    });
+  }
+
+  function loadMapLibrary() {
+    mapLoading ||= (useGoogle() ? loadGoogle() : loadLeaflet()).catch((err) => { mapLoading = null; throw err; });
+    return mapLoading;
+  }
 
   function loadLeaflet() {
-    if (window.L) return Promise.resolve();
-    leafletLoading ||= new Promise((ok, fail) => {
-      const css = document.createElement("link");
-      css.rel = "stylesheet"; css.href = LEAFLET + ".css";
-      const js = document.createElement("script");
-      js.src = LEAFLET + ".js"; js.onload = ok;
-      js.onerror = () => { leafletLoading = null; fail(new Error("map library didn't load")); };
-      document.head.append(css, js);
+    const css = document.createElement("link");
+    css.rel = "stylesheet"; css.href = LEAFLET + ".css";
+    document.head.append(css);
+    return addScript(LEAFLET + ".js");
+  }
+
+  function loadGoogle() {
+    return new Promise((ok, fail) => {
+      window.__mapsReady = ok;
+      // Google calls this if it rejects the key (wrong website restriction, API not enabled…).
+      window.gm_authFailure = () => { state.mapProblem = "Google rejected the map key. Check its website restriction and that Maps JavaScript API is enabled."; showMapHint(); };
+      const key = state.mapsKey ? `key=${encodeURIComponent(state.mapsKey)}&` : "";
+      addScript(`https://maps.googleapis.com/maps/api/js?${key}v=weekly&loading=async&callback=__mapsReady`).catch(fail);
     });
-    return leafletLoading;
+  }
+
+  function showMapHint() {
+    const hint = $("map-hint");
+    hint.classList.toggle("picking", state.picking && !state.mapProblem);
+    hint.textContent = state.mapProblem || (state.picking ? "Tap the map where you'll be starting from."
+      : "Tap a pin for details. Press and hold the map to start from that spot.");
   }
 
   async function showMap(list) {
-    const hint = $("map-hint");
-    hint.classList.toggle("picking", state.picking);
-    hint.textContent = state.picking ? "Tap the map where you'll be starting from."
-      : "Tap a pin for details. Press and hold the map to start from that spot.";
-    try { await loadLeaflet(); } catch {
-      hint.textContent = "Couldn't load the map. Check your connection and switch to Map again.";
+    showMapHint();
+    try { await loadMapLibrary(); } catch {
+      state.mapProblem = "Couldn't load the map. Check your connection and switch to Map again.";
+      showMapHint();
+      state.mapProblem = "";
       return;
     }
     if (state.view !== "map") return; // switched away while loading
 
+    const pins = list.filter((x) => x.near).map((x) => ({
+      x, lat: x.near.loc.lat, lng: x.near.loc.lng,
+      color: x.closedOnArrival ? PIN.closed : x.boost ? PIN.boost : PIN.open,
+      selected: x.p.key === state.selectedKey,
+    }));
+    const tapPin = (pin) => {
+      if (state.picking) return startFrom(pin);
+      state.selectedKey = pin.x.p.key;
+      render();
+    };
+    // Re-centre only when the starting point changes, so panning around isn't undone.
+    const origin = state.here ? `${state.here.lat.toFixed(4)},${state.here.lng.toFixed(4)}` : "none";
+    const recenter = mapCenteredOn !== origin;
+    mapCenteredOn = origin;
+
+    (useGoogle() ? drawGoogle : drawLeaflet)(pins, tapPin, recenter);
+
+    const chosen = list.find((x) => x.p.key === state.selectedKey);
+    $("map-card").replaceChildren(...(chosen ? [card(chosen)] : []));
+  }
+
+  function drawGoogle(pins, tapPin, recenter) {
+    const G = google.maps;
+    if (!map) {
+      map = new G.Map($("map"), {
+        center: SEATTLE, zoom: 12,
+        mapTypeControl: false, streetViewControl: false, fullscreenControl: false,
+        clickableIcons: false,     // Google's own place icons would steal taps meant for the map
+        gestureHandling: "greedy", // one finger moves the map
+      });
+      const spot = (e) => ({ lat: e.latLng.lat(), lng: e.latLng.lng() });
+      map.addListener("click", (e) => { if (state.picking) startFrom(spot(e)); });
+      map.addListener("contextmenu", (e) => startFrom(spot(e))); // press and hold
+    }
+    const at = (pt) => ({ lat: pt.lat, lng: pt.lng }); // Google wants only these two fields
+    const dot = (color, selected, size = 8) => ({
+      path: G.SymbolPath.CIRCLE, scale: selected ? 11 : size, fillColor: color, fillOpacity: 0.95,
+      strokeColor: selected ? "#111" : "#fff", strokeWeight: selected ? 3 : 2,
+    });
+    gMarkers.forEach((m) => m.setMap(null));
+    gMarkers = pins.map((pin) => {
+      const m = new G.Marker({ map, position: at(pin), icon: dot(pin.color, pin.selected), zIndex: pin.selected ? 1000 : 1, title: pin.x.p.name });
+      m.addListener("click", () => tapPin(pin));
+      return m;
+    });
+    if (state.here) {
+      gMarkers.push(new G.Marker({ map, position: at(state.here), icon: dot(PIN.you, false, 9), clickable: false, zIndex: 999 }));
+    }
+    if (!recenter) return;
+    if (state.here) { map.setCenter(at(state.here)); map.setZoom(14); }
+    else if (pins.length) {
+      const box = new G.LatLngBounds();
+      pins.forEach((pin) => box.extend(at(pin)));
+      map.fitBounds(box, 24);
+    }
+  }
+
+  function drawLeaflet(pins, tapPin, recenter) {
     if (!map) {
       map = L.map("map", { preferCanvas: true });
       L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",
@@ -565,39 +655,20 @@
       map.on("contextmenu", (e) => startFrom(e.latlng)); // press and hold
     }
     map.invalidateSize(); // the map was hidden, so it needs to re-measure itself
-
     pinLayer.clearLayers();
-    const points = [];
-    for (const x of list) {
-      if (!x.near) continue; // Google couldn't place it
-      const at = [x.near.loc.lat, x.near.loc.lng];
-      points.push(at);
-      const selected = x.p.key === state.selectedKey;
-      L.circleMarker(at, {
-        radius: selected ? 11 : 8, weight: selected ? 3 : 2, color: selected ? "#111" : "#fff", fillOpacity: 0.95,
-        fillColor: x.closedOnArrival ? PIN.closed : x.boost ? PIN.boost : PIN.open,
-      }).on("click", (e) => {
-        L.DomEvent.stopPropagation(e);
-        if (state.picking) return startFrom(e.latlng);
-        state.selectedKey = x.p.key;
-        render();
-      }).addTo(pinLayer);
+    for (const pin of pins) {
+      L.circleMarker([pin.lat, pin.lng], {
+        radius: pin.selected ? 11 : 8, weight: pin.selected ? 3 : 2, color: pin.selected ? "#111" : "#fff",
+        fillOpacity: 0.95, fillColor: pin.color,
+      }).on("click", (e) => { L.DomEvent.stopPropagation(e); tapPin(pin); }).addTo(pinLayer);
     }
     if (state.here) {
       L.circleMarker([state.here.lat, state.here.lng],
         { radius: 9, weight: 3, color: "#fff", fillColor: PIN.you, fillOpacity: 1, interactive: false }).addTo(pinLayer);
     }
-
-    // Re-centre only when the starting point changes, so panning around isn't undone.
-    const origin = state.here ? `${state.here.lat.toFixed(4)},${state.here.lng.toFixed(4)}` : "none";
-    if (mapCenteredOn !== origin) {
-      mapCenteredOn = origin;
-      if (state.here) map.setView([state.here.lat, state.here.lng], 14);
-      else if (points.length) map.fitBounds(points, { padding: [24, 24] });
-    }
-
-    const chosen = list.find((x) => x.p.key === state.selectedKey);
-    $("map-card").replaceChildren(...(chosen ? [card(chosen)] : []));
+    if (!recenter) return;
+    if (state.here) map.setView([state.here.lat, state.here.lng], 14);
+    else if (pins.length) map.fitBounds(pins.map((pin) => [pin.lat, pin.lng]), { padding: [24, 24] });
   }
 
   /** A spot picked on the map becomes the plan's starting point (the planned time is kept). */

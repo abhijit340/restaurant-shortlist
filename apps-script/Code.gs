@@ -33,7 +33,12 @@ function doGet(e) {
   try {
     if (e.parameter.action === 'times') return json_(travelTimes_(e.parameter.from, e.parameter.to, e.parameter.when));
     if (e.parameter.action === 'geocode') return json_(geocode_(e.parameter.q));
-    return json_({ places: withAppData_(readSourcePlaces_(), readAppData_()), loadedAt: new Date().toISOString() });
+    return json_({
+      places: withAppData_(readSourcePlaces_(), readAppData_()),
+      // The browser map key (locked to the app's web address and to Maps JavaScript only).
+      mapsKey: PropertiesService.getScriptProperties().getProperty('MAPS_BROWSER_KEY') || '',
+      loadedAt: new Date().toISOString(),
+    });
   } catch (err) {
     return json_({ error: String(err) });
   }
