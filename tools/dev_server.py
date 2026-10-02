@@ -10,6 +10,7 @@ walking ≈ 20 min/mile, transit ≈ 8 min + 6 min/mile (none past 6 miles).
 """
 import json
 import math
+import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -47,8 +48,10 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
         url = urlparse(self.path)
-        if url.path != "/mock-exec":
+        if url.path not in ("/mock-exec", "/mock-exec-slow"):
             return super().do_GET()
+        if url.path == "/mock-exec-slow":
+            time.sleep(3)  # a slow Sheet, for testing the instant start from the saved list
         params = parse_qs(url.query)
         if params.get("key") != ["test"]:
             body = {"error": "bad-key"}

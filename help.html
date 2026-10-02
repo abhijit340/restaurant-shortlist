@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Nearby Eats help</title>
+  <meta name="theme-color" content="#1f6f5c">
+  <link rel="icon" href="icons/icon-192.png">
+  <style>
+    :root { --bg: #f6f4ef; --card: #ffffff; --text: #1d1d1b; --muted: #6b6b66; --accent: #1f6f5c; --border: #e2dfd7; }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg: #151714; --card: #1f221e; --text: #ecebe6; --muted: #a3a39c; --accent: #4fb89c; --border: #33372f; }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: var(--bg); color: var(--text);
+      font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      padding: max(16px, env(safe-area-inset-top)) 16px 40px;
+    }
+    main { max-width: 560px; margin: 0 auto; }
+    h1 { font-size: 1.5rem; margin: 8px 0 4px; }
+    h2 { font-size: 1.1rem; margin: 28px 0 8px; }
+    a { color: var(--accent); }
+    section { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 4px 16px 12px; margin-top: 12px; }
+    ul, ol { padding-left: 20px; margin: 8px 0; }
+    li { margin: 6px 0; }
+    code { background: var(--bg); padding: 1px 5px; border-radius: 4px; }
+    .muted { color: var(--muted); }
+    table { border-collapse: collapse; width: 100%; }
+    td { padding: 6px 8px 6px 0; vertical-align: top; border-top: 1px solid var(--border); }
+    tr:first-child td { border-top: 0; }
+    td:first-child { white-space: nowrap; }
+  </style>
+</head>
+<body>
+<main>
+  <p><a href="./">← Back to the list</a></p>
+  <h1>Nearby Eats help</h1>
+  <p class="muted">The list comes from your Google Sheet. The app only reads your restaurant tab; everything it saves goes to the "app data" tab.</p>
+
+  <section>
+    <h2>Reading a card</h2>
+    <table>
+      <tr><td>🚌 17 min</td><td>Transit time from where you are (or your planned start). The walk is listed too when it's under 25 minutes.</td></tr>
+      <tr><td>1.2 mi</td><td>Straight-line distance, for places beyond the nearest 15 or when there's no signal.</td></tr>
+      <tr><td>🕒 / ⚠️ / 🔴</td><td>Open until a time and how long you'd have; under an hour is flagged; closed when you'd arrive.</td></tr>
+      <tr><td>🍹 / 🏷</td><td>Happy hour on (or starting within 30 min) when you'd arrive, or a special that day. These places move to the top.</td></tr>
+      <tr><td>💳 inKind</td><td>The deals or description cell says "inkind". Also moves to the top when open.</td></tr>
+      <tr><td>⭐ 💚 ✓</td><td>From your "would recommend" section; a green-highlighted row; marked visited in the app.</td></tr>
+    </table>
+    <p>Tap a card to open the place in Google Maps.</p>
+  </section>
+
+  <section>
+    <h2>Planning ahead</h2>
+    <ul>
+      <li>Tap <b>📍 Near me · now</b> to pick a starting place, a time, or both.</li>
+      <li><b>Pick on map</b>, or press and hold the map, to start from a dropped pin.</li>
+      <li><b>Back to here and now</b> resets it.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Changing the list</h2>
+    <ul>
+      <li>Add, edit, or remove places in the restaurant tab of the Sheet, then tap <b>Refresh</b>. New places get their location and hours overnight, or right away from the Sheet's <b>Nearby Eats → Fill missing info</b> menu.</li>
+      <li><b>Deals</b> are read from the deals column: days and times like <code>HH m-f 4-6</code>, <code>daily 5-6, 9-close</code>, or <code>$2 oysters mondays</code>. "Happy hour" with no times is shown but can't be ranked.</li>
+      <li>Type <code>inkind</code> in a place's deals cell to give it the inKind chip.</li>
+      <li>A green fill on the name marks a favorite. Rows under your avoid heading never appear.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>The "app data" tab</h2>
+    <ul>
+      <li>The script manages it. Two things are yours to type in the <b>Status</b> column: <code>ok</code> (the Google match is right, stop flagging it) and <code>skip</code> (not a single place, so no location).</li>
+      <li>Red rows weren't found on Google; yellow rows matched a different name. Fixing the name or neighborhood in the restaurant tab makes it look again.</li>
+      <li>Visits you mark in the app are saved here: date, verdict, deals seen, notes.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Costs and limits</h2>
+    <ul>
+      <li>The Sheet's <b>Nearby Eats → Show Google usage this month</b> menu shows how much of each free allowance is used. The script stops itself at about 90% of each.</li>
+      <li>Travel times are reused if you've moved less than 200 m in the last 10 minutes.</li>
+      <li>The map view's own limit is the daily cap set on the map key in Google Cloud.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>If something's wrong</h2>
+    <ul>
+      <li><b>"Couldn't update the list"</b>: no signal. The app shows the copy it saved last time, sorted by straight-line distance.</li>
+      <li><b>List is A–Z</b>: location is blocked or off. Allow it for this site in Chrome's site settings.</li>
+      <li><b>"The key doesn't match"</b>: use <b>Change Sheet connection</b> at the bottom of the list and paste the URL and key again.</li>
+      <li><b>The link got out</b>: in Apps Script, run <code>resetKey</code>, then <code>showAppSetup</code>, and enter the new key on each phone.</li>
+    </ul>
+  </section>
+</main>
+</body>
+</html>

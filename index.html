@@ -111,6 +111,7 @@
     #more { margin-top: 12px; width: 100%; background: var(--card); color: var(--text); border: 1px solid var(--border); }
     .empty { color: var(--muted); text-align: center; padding: 24px 0; }
     footer { color: var(--muted); font-size: .8rem; margin-top: 24px; text-align: center; }
+    footer a { color: inherit; }
     [hidden] { display: none !important; }
   </style>
 </head>
@@ -199,7 +200,7 @@
   <button id="more" hidden>Show more</button>
 
   <footer>
-    v0.18<span id="reconnect" hidden> · <button class="link">Change Sheet connection</button></span>
+    v0.19 · <a href="help.html">Help</a><span id="reconnect" hidden> · <button class="link">Change Sheet connection</button></span>
   </footer>
 </main>
 
@@ -232,6 +233,7 @@
   const CONFIG_KEY = "nearbyeats.config";
   const FILTERS_KEY = "nearbyeats.filters";
   const TIMES_KEY = "nearbyeats.times";
+  const LIST_KEY = "nearbyeats.list";   // the last list loaded, for an instant start and for no-signal use
   const PAGE = 40;                   // cards shown at a time
   const TIMED = 15;                  // nearest places that get real travel times
   const REUSE_METERS = 200;          // reuse travel times if you've moved less than this…
@@ -293,7 +295,9 @@
     try {
       res = await request;
     } catch {
-      throw new Error("Couldn't reach Google. Check your connection and try again.");
+      const err = new Error("Couldn't reach Google. Check your connection and try again.");
+      err.code = "no-connection";
+      throw err;
     }
     let data;
     try { data = await res.json(); } catch {
@@ -337,33 +341,10 @@
     });
   }
 
-  async function load() {
-    const cfg = loadJSON(CONFIG_KEY);
-    if (!cfg) return showSetup();
-    $("setup").hidden = true;
-    $("error").hidden = true;
-    $("refresh").hidden = false;
-    $("reconnect").hidden = false;
-    $("refresh").disabled = true;
-    $("status").textContent = "Loading from the Sheet and finding you…";
-
-    // Fetch the list and find your location at the same time.
-    const [data, here] = await Promise.allSettled([callScript(cfg), locate()]);
-    $("refresh").disabled = false;
-
-    state.here = here.status === "fulfilled" ? here.value : null;
-    state.hereError = here.status === "rejected" ? here.reason.message : "";
-    state.timesError = "";
-    forgetFailedTimes();
-
-    if (data.status === "rejected") {
-      $("status").textContent = "";
-      $("error").textContent = data.reason.message;
-      $("error").hidden = false;
-      return;
-    }
-    state.places = data.value.places;
-    state.mapsKey = data.value.mapsKey || "";
+  /** Puts a list (fresh from the Sheet, or the saved copy) on screen. */
+  function useList(d) {
+    state.places = d.places;
+    state.mapsKey = d.mapsKey || "";
     for (const p of state.places) {
       p.dealWindows = Deals.parseDeals(p.deals).windows;
       p.inkind = /\binkind\b/i.test(`${p.deals} ${p.desc}`); // inKind dining credit accepted
@@ -372,6 +353,59 @@
     fillTagOptions();
     updatePlanUI();
     $("controls").hidden = false;
+  }
+
+  async function load() {
+    const cfg = loadJSON(CONFIG_KEY);
+    if (!cfg) return showSetup();
+    $("setup").hidden = true;
+    $("error").hidden = true;
+    $("refresh").hidden = false;
+    $("reconnect").hidden = false;
+    $("refresh").disabled = true;
+    state.listNote = "";
+    state.offline = false;
+    state.timesError = "";
+    forgetFailedTimes();
+
+    // Ask the Sheet for the list and find your location at the same time…
+    const fetching = callScript(cfg).then((value) => ({ value }), (reason) => ({ reason }));
+    const locating = locate().then((value) => ({ value }), (reason) => ({ reason }));
+
+    // …and meanwhile show the list saved from last time, so the app opens instantly.
+    const saved = state.places.length ? null : loadJSON(LIST_KEY);
+    if (saved) {
+      useList(saved);
+      state.updating = true;
+      render();
+    } else if (!state.places.length) {
+      $("status").textContent = "Loading from the Sheet and finding you…";
+    }
+
+    const here = await locating;
+    state.here = here.value || null;
+    state.hereError = here.reason ? here.reason.message : "";
+    if (state.places.length) render(); // sorted by distance as soon as we know where you are
+
+    const data = await fetching;
+    $("refresh").disabled = false;
+    state.updating = false;
+    if (data.value) {
+      useList(data.value);
+      saveJSON(LIST_KEY, data.value);
+    } else if (state.places.length) {
+      // No answer from the Sheet (usually no signal): keep what we have.
+      const when = clock(new Date(loadJSON(LIST_KEY)?.loadedAt || Date.now()), true);
+      state.offline = true;
+      state.listNote = data.reason.code === "no-connection"
+        ? `No connection, so this is the list saved ${when}, sorted by straight-line distance. Tap Refresh when you're back online.`
+        : `Couldn't update the list: ${data.reason.message} Showing the copy saved ${when}.`;
+    } else {
+      $("status").textContent = "";
+      $("error").textContent = data.reason.message;
+      $("error").hidden = false;
+      return;
+    }
     render();
   }
 
@@ -407,7 +441,7 @@
 
   async function fetchTimes(nearest) {
     const cfg = loadJSON(CONFIG_KEY);
-    if (!cfg || !state.here || state.timesLoading || state.timesError) return;
+    if (!cfg || !state.here || state.timesLoading || state.timesError || state.offline) return;
     const times = timesFor(state.here);
     const need = nearest.filter((x) => !times.byKey[x.p.key]);
     if (!need.length) return;
@@ -843,12 +877,13 @@
     let where = "A–Z";
     if (here) {
       where = state.timesLoading ? "getting walking & transit times…"
-        : state.timesError ? "sorted by distance"
+        : state.timesError || state.offline ? "sorted by distance"
         : `travel times for the nearest ${state.timedCount ?? TIMED}`;
       if (here.acc > 100) where += ` (location ±${Math.round(here.acc)} m)`;
     }
-    $("status").textContent = `${state.lastCount ?? 0} places · ${where}` + (closedCount ? ` · ${closedCount} closed hidden` : "");
-    const problem = state.hereError || state.timesError;
+    $("status").textContent = `${state.lastCount ?? 0} places · ${where}` + (closedCount ? ` · ${closedCount} closed hidden` : "") +
+      (state.updating ? " · updating…" : "");
+    const problem = [state.listNote, state.hereError, state.timesError].filter(Boolean).join(" ");
     $("error").textContent = problem;
     $("error").hidden = !problem;
   }
