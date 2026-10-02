@@ -45,7 +45,7 @@
       padding: 14px 16px; margin-top: 12px;
     }
     label { display: block; font-weight: 600; margin: 12px 0 4px; }
-    input, select {
+    input, select, textarea {
       width: 100%; padding: 12px; font-size: 1rem; border-radius: 10px;
       border: 1px solid var(--border); background: var(--card); color: var(--text);
     }
@@ -94,6 +94,17 @@
     .chip.star { background: var(--star-bg); color: var(--star); }
     .chip.fav { background: var(--fav-bg); color: var(--fav); }
     .chip.warn { background: var(--chip); color: var(--error); }
+    .chip.visited { background: var(--fav-bg); color: var(--fav); }
+    .visit-btn {
+      margin-top: 10px; padding: 8px 12px; font-size: .85rem; font-weight: 500; border-radius: 999px;
+      background: var(--card); color: var(--text); border: 1px solid var(--border);
+    }
+    textarea { font-family: inherit; resize: vertical; }
+    dialog {
+      width: min(92vw, 480px); border: 1px solid var(--border); border-radius: 16px; padding: 18px;
+      background: var(--card); color: var(--text);
+    }
+    dialog::backdrop { background: rgba(0, 0, 0, .55); }
     #more { margin-top: 12px; width: 100%; background: var(--card); color: var(--text); border: 1px solid var(--border); }
     .empty { color: var(--muted); text-align: center; padding: 24px 0; }
     footer { color: var(--muted); font-size: .8rem; margin-top: 24px; text-align: center; }
@@ -156,6 +167,7 @@
     <div class="row">
       <button class="toggle" data-flag="fav" aria-pressed="false">💚 Favorites</button>
       <button class="toggle" data-flag="deals" aria-pressed="false">🍹 Deals</button>
+      <button class="toggle" data-flag="unvisited" aria-pressed="false">Hide visited</button>
       <select id="tag" aria-label="Group"><option value="">All groups</option></select>
     </div>
     <div class="row">
@@ -181,9 +193,32 @@
   <button id="more" hidden>Show more</button>
 
   <footer>
-    v0.16<span id="reconnect" hidden> · <button class="link">Change Sheet connection</button></span>
+    v0.17<span id="reconnect" hidden> · <button class="link">Change Sheet connection</button></span>
   </footer>
 </main>
+
+<!-- Mark visited: verdict, deals seen, notes. Saved to the Sheet's "app data" tab. -->
+<dialog id="visit">
+  <form id="visit-form">
+    <strong id="visit-title"></strong>
+    <label>How was it?</label>
+    <div class="row" id="visit-verdicts">
+      <button type="button" class="toggle" data-verdict="Loved" aria-pressed="false">😍 Loved</button>
+      <button type="button" class="toggle" data-verdict="Good" aria-pressed="false">🙂 Good</button>
+      <button type="button" class="toggle" data-verdict="Meh" aria-pressed="false">😐 Meh</button>
+    </div>
+    <label for="visit-deals">Happy hour or deals you saw</label>
+    <input id="visit-deals" maxlength="500" placeholder="Optional" autocomplete="off">
+    <label for="visit-notes">Notes</label>
+    <textarea id="visit-notes" rows="3" maxlength="500" placeholder="Optional"></textarea>
+    <p class="error" id="visit-error" hidden></p>
+    <div class="row" style="margin-top:14px; align-items:center">
+      <button id="visit-save">Save</button>
+      <button type="button" class="link" id="visit-cancel">Cancel</button>
+      <button type="button" class="link" id="visit-remove" hidden>Remove visit</button>
+    </div>
+  </form>
+</dialog>
 
 <script src="deals.js"></script>
 <script>
@@ -210,7 +245,7 @@
     hereError: "",
     plan: { place: null, when: null },  // place: { query, label, lat, lng }; when: ms. null = here / now
     geocoded: {},                       // typed places already looked up this session
-    filters: { q: "", section: "all", fav: false, deals: false, tag: "", open: false, max: 0 },
+    filters: { q: "", section: "all", fav: false, deals: false, unvisited: false, tag: "", open: false, max: 0 },
     shown: PAGE,
     times: { origin: null, at: 0, byKey: {} },  // travel times, keyed by place
     timesLoading: false,
@@ -231,10 +266,24 @@
 
   // ---------- Talking to the Sheet's script ----------
 
-  async function callScript(cfg, extra = "") {
+  /** Reads from the script (the list, travel times, place lookups). */
+  function callScript(cfg, extra = "") {
+    return scriptAnswer(fetch(`${cfg.url}?key=${encodeURIComponent(cfg.key)}${extra}`, { cache: "no-store" }));
+  }
+
+  /** Saves a change to the Sheet. Sent as plain text so the browser doesn't need a pre-check request. */
+  function postScript(cfg, body) {
+    return scriptAnswer(fetch(cfg.url, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify({ key: cfg.key, ...body }),
+    }));
+  }
+
+  async function scriptAnswer(request) {
     let res;
     try {
-      res = await fetch(`${cfg.url}?key=${encodeURIComponent(cfg.key)}${extra}`, { cache: "no-store" });
+      res = await request;
     } catch {
       throw new Error("Couldn't reach Google. Check your connection and try again.");
     }
@@ -248,6 +297,8 @@
       "bad-key": "The key doesn't match. Re-run showAppSetup and copy the key again.",
       "monthly-limit": "This month's free Google allowance for that is used up; it resets next month.",
       "not-found": "Couldn't find that place. Try adding a street, neighborhood, or city.",
+      "busy": "The Sheet is busy with an update right now. Try again in a few minutes.",
+      "no-such-place": "That place isn't in the Sheet any more. Tap Refresh.",
     };
     const err = new Error(messages[data.error] || "The Sheet's script had a problem: " + data.error);
     err.code = data.error;
@@ -452,6 +503,7 @@
     if (f.section !== "all" && p.section !== f.section) return false;
     if (f.fav && !p.fav) return false;
     if (f.deals && !p.deals) return false;
+    if (f.unvisited && p.visit) return false;
     if (f.tag && !p.tags.includes(f.tag)) return false;
     if (f.q) {
       const hay = [p.name, p.desc, p.cuisine, p.hood, p.deals, ...p.tags].join(" ").toLowerCase();
@@ -512,7 +564,7 @@
     if (!list.length) {
       const empty = el("p", "empty", "Nothing matches these filters. ");
       const clear = el("button", "link", "Clear filters");
-      clear.addEventListener("click", () => setFilter({ q: "", section: "all", fav: false, deals: false, tag: "", open: false, max: 0 }));
+      clear.addEventListener("click", () => setFilter({ q: "", section: "all", fav: false, deals: false, unvisited: false, tag: "", open: false, max: 0 }));
       empty.append(clear);
       out.append(empty);
     }
@@ -829,16 +881,79 @@
     c.append(where);
 
     if (p.deals) c.append(el("p", "meta", "🍹 " + p.deals));
+    if (p.visit && p.visit.deals) c.append(el("p", "meta", "👀 Deals we saw: " + p.visit.deals));
+    if (p.visit && p.visit.notes) c.append(el("p", "meta", "📝 " + p.visit.notes));
 
     const chips = el("div", "chips");
+    if (p.visit) chips.append(el("span", "chip visited", `✓ Visited · ${p.visit.verdict}`));
     if (p.section === "recommend") chips.append(el("span", "chip star", "⭐ Been & loved"));
     if (p.fav) chips.append(el("span", "chip fav", "💚 Favorite"));
     if (p.inkind) chips.append(el("span", "chip fav", "💳 inKind"));
     if (p.closed === "closed temporarily") chips.append(el("span", "chip warn", "⏸ Temporarily closed (Google)"));
     for (const tag of p.tags) chips.append(el("span", "chip", tag));
     if (chips.children.length) c.append(chips);
+
+    const visit = el("button", "visit-btn above", p.visit ? "✎ Edit visit" : "✓ Mark visited");
+    visit.addEventListener("click", () => openVisit(p));
+    c.append(visit);
     return c;
   }
+
+  // ---------- Mark visited ----------
+
+  let visiting = null; // the place the form is open for
+
+  function setVerdict(v) {
+    document.querySelectorAll("[data-verdict]").forEach((b) => b.setAttribute("aria-pressed", b.dataset.verdict === v));
+  }
+  const chosenVerdict = () => document.querySelector('[data-verdict][aria-pressed="true"]')?.dataset.verdict || "";
+
+  function openVisit(p) {
+    visiting = p;
+    const v = p.visit || {};
+    $("visit-title").textContent = p.name;
+    setVerdict(v.verdict || "");
+    $("visit-deals").value = v.deals || "";
+    $("visit-notes").value = v.notes || "";
+    $("visit-error").hidden = true;
+    $("visit-remove").hidden = !p.visit;
+    $("visit").showModal();
+  }
+
+  /** Saves (or, with no verdict, removes) the visit, then updates the card without reloading the list. */
+  async function saveVisit(verdict) {
+    const buttons = [$("visit-save"), $("visit-remove")];
+    buttons.forEach((b) => { b.disabled = true; });
+    $("visit-error").hidden = true;
+    try {
+      const data = await postScript(loadJSON(CONFIG_KEY), {
+        action: "visit", place: visiting.key, verdict,
+        deals: $("visit-deals").value, notes: $("visit-notes").value,
+      });
+      visiting.visit = data.visit;
+      $("visit").close();
+      render();
+    } catch (err) {
+      $("visit-error").textContent = err.message;
+      $("visit-error").hidden = false;
+    } finally {
+      buttons.forEach((b) => { b.disabled = false; });
+    }
+  }
+
+  document.querySelectorAll("[data-verdict]").forEach((b) =>
+    b.addEventListener("click", () => setVerdict(b.dataset.verdict)));
+  $("visit-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    if (!chosenVerdict()) {
+      $("visit-error").textContent = "Pick Loved, Good, or Meh first.";
+      $("visit-error").hidden = false;
+      return;
+    }
+    saveVisit(chosenVerdict());
+  });
+  $("visit-remove").addEventListener("click", () => saveVisit(""));
+  $("visit-cancel").addEventListener("click", () => $("visit").close());
 
   /**
    * With a travel time:    "🕒 Open till 11:30 PM · you'd have 2 h 46 min"

@@ -27,6 +27,20 @@ const RANK = { try: 1, recommend: 2, avoid: 3 };
 
 // ---------- Web endpoint ----------
 
+/** Changes come in as POSTs with a JSON body: { key, action: "visit", place, verdict, deals, notes }. */
+function doPost(e) {
+  let body;
+  try { body = JSON.parse(e.postData.contents); } catch (err) { return json_({ error: 'bad-request' }); }
+  const key = PropertiesService.getScriptProperties().getProperty('KEY');
+  if (!key || body.key !== key) return json_({ error: 'bad-key' });
+  try {
+    if (body.action === 'visit') return json_(saveVisit_(body));
+    return json_({ error: 'bad-request' });
+  } catch (err) {
+    return json_({ error: String(err) });
+  }
+}
+
 function doGet(e) {
   const key = PropertiesService.getScriptProperties().getProperty('KEY');
   if (!key || !e || e.parameter.key !== key) return json_({ error: 'bad-key' });
@@ -119,7 +133,7 @@ function fillMissing() {
       batch.forEach((p, j) => {
         const rec = toRecord_(p, responses[j].getResponseCode(), responses[j].getContentText());
         if (rec.status === 'retry') { rateLimited = true; return; }
-        data.set(p.key, rec);
+        data.set(p.key, carryVisit_(rec, data.get(p.key)));
         done++;
         remaining--;
       });
@@ -583,7 +597,57 @@ function refreshFromSearch_(old, fresh) {
   if (fresh.status === 'retry' || /^error/.test(fresh.status)) return old;
   if (fresh.status === 'not found') return Object.assign({}, old, { at: today_() });
   if (old.status === 'ok' && fresh.status === 'check name') fresh.status = 'ok'; // you'd approved it
-  return fresh;
+  return carryVisit_(fresh, old);
+}
+
+// ---------- Mark visited ----------
+
+const VERDICTS = ['Loved', 'Good', 'Meh'];
+
+function saveVisit_(body) {
+  // A long lookup or refresh run rewrites the whole tab, so wait for it rather than race it.
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(15000)) return { error: 'busy' };
+  try {
+    const places = readSourcePlaces_();
+    const place = places.find(p => p.key === body.place);
+    if (!place) return { error: 'no-such-place' };
+    const data = readAppData_();
+    const rec = data.get(place.key) ||
+      { key: place.key, name: place.name, row: place.row, status: '', query: '', at: '', locs: [] };
+    data.set(place.key, applyVisit_(rec, body, today_()));
+    writeAppData_(data, places);
+    return { ok: true, visit: visitOf_(data.get(place.key)) };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** Sets (or, with no verdict, clears) the visit on a record. The first visit date is kept on edits. */
+function applyVisit_(rec, body, today) {
+  const clip = (x) => String(x || '').trim().slice(0, 500);
+  if (!VERDICTS.includes(body.verdict)) {
+    return Object.assign({}, rec, { visited: '', verdict: '', dealsSeen: '', visitNotes: '' });
+  }
+  return Object.assign({}, rec, {
+    visited: rec.visited || today, verdict: body.verdict, dealsSeen: clip(body.deals), visitNotes: clip(body.notes),
+  });
+}
+
+/** The visit as the app sees it, or null. Sheets turns typed dates into Date objects; send text. */
+function visitOf_(rec) {
+  if (!rec || !rec.verdict) return null;
+  const date = rec.visited instanceof Date
+    ? Utilities.formatDate(rec.visited, 'America/Los_Angeles', 'yyyy-MM-dd') : String(rec.visited || '');
+  return { date, verdict: rec.verdict, deals: rec.dealsSeen || '', notes: rec.visitNotes || '' };
+}
+
+/** A fresh Google lookup replaces a record; keep the visit that was on the old one. */
+function carryVisit_(fresh, old) {
+  if (!old || fresh.status === 'retry') return fresh;
+  return Object.assign(fresh, {
+    visited: old.visited || '', verdict: old.verdict || '', dealsSeen: old.dealsSeen || '', visitNotes: old.visitNotes || '',
+  });
 }
 
 function needsLookup_(p, rec) {
@@ -619,6 +683,7 @@ function withAppData_(places, data) {
       closed: overallStatus_(locs),
       locs: locs.filter(l => l.status !== 'CLOSED_PERMANENTLY')
         .map(l => ({ lat: l.lat, lng: l.lng, addr: l.addr, maps: l.maps, hours: l.hours || [] })),
+      visit: visitOf_(rec),
     });
   });
 }
@@ -627,48 +692,80 @@ function today_() { return Utilities.formatDate(new Date(), 'America/Los_Angeles
 
 // ---------- The "app data" tab ----------
 
-const DATA_HEADERS = ['key', 'Your name', 'Sheet row', 'Status', 'Google name', 'Address',
-  'Locations', 'Cuisine (Google)', 'Open/closed', 'Searched for', 'Last updated', 'data (JSON)'];
+// Visit columns sit next to the place name so they're easy to read; the long
+// JSON column stays last. Columns are found by header name, so an older tab
+// (different order, fewer columns) still reads correctly.
+const DATA_HEADERS = ['key', 'Your name', 'Sheet row', 'Status', 'Visited', 'Verdict', 'Deals seen',
+  'Visit notes', 'Google name', 'Address', 'Locations', 'Cuisine (Google)', 'Open/closed',
+  'Searched for', 'Last updated', 'data (JSON)'];
 const STATUS_COLORS = { 'not found': '#f4cccc', 'check name': '#fff2cc', 'skip': '#efefef' };
 
 function readAppData_() {
-  const map = new Map();
   const sheet = SpreadsheetApp.getActive().getSheetByName(DATA_TAB);
-  if (!sheet || sheet.getLastRow() < 2) return map;
-  const rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, DATA_HEADERS.length).getValues();
+  if (!sheet || sheet.getLastRow() < 2) return new Map();
+  const values = sheet.getRange(1, 1, sheet.getLastRow(), sheet.getLastColumn()).getValues();
+  return rowsToData_(values[0], values.slice(1));
+}
+
+/** Tab rows → Map of records, using the header row to find each column. Pure, testable. */
+function rowsToData_(header, rows) {
+  const col = (name) => header.indexOf(name);
+  const c = {
+    key: col('key'), name: col('Your name'), row: col('Sheet row'), status: col('Status'),
+    visited: col('Visited'), verdict: col('Verdict'), dealsSeen: col('Deals seen'), visitNotes: col('Visit notes'),
+    query: col('Searched for'), json: col('data (JSON)'),
+    at: Math.max(col('Last updated'), col('Looked up')), // older tabs called it "Looked up"
+  };
+  const get = (r, i) => (i < 0 || r[i] == null ? '' : r[i]);
+  const map = new Map();
   for (const r of rows) {
-    if (!r[0]) continue;
+    const key = get(r, c.key);
+    if (!key) continue;
     let locs = [];
-    try { locs = JSON.parse(r[11] || '[]'); } catch (e) { /* hand-edited cell; look it up again */ }
+    try { locs = JSON.parse(get(r, c.json) || '[]'); } catch (e) { /* hand-edited cell; look it up again */ }
     // Accept hand-typed statuses in any case ("OK", " Skip").
-    const typed = String(r[3]).trim().toLowerCase();
-    const status = MANUAL_STATUSES.includes(typed) ? typed : r[3];
-    map.set(r[0], { key: r[0], name: r[1], row: r[2], status, query: r[9], at: r[10], locs });
+    const typed = String(get(r, c.status)).trim().toLowerCase();
+    map.set(key, {
+      key, name: get(r, c.name), row: get(r, c.row),
+      status: MANUAL_STATUSES.includes(typed) ? typed : get(r, c.status),
+      query: get(r, c.query), at: get(r, c.at), locs,
+      visited: get(r, c.visited), verdict: get(r, c.verdict),
+      dealsSeen: get(r, c.dealsSeen), visitNotes: get(r, c.visitNotes),
+    });
   }
   return map;
 }
 
-/** Rewrites the tab in sheet order. Places no longer in the list (or moved to AVOID) drop off. */
-function writeAppData_(data, places) {
-  const ss = SpreadsheetApp.getActive();
-  const sheet = ss.getSheetByName(DATA_TAB) || ss.insertSheet(DATA_TAB);
+/** Records → tab rows in sheet order, plus each row's status color. Pure, testable. */
+function dataToRows_(data, places) {
   const rows = [];
   const colors = [];
   for (const p of places) {
     const r = data.get(p.key);
     if (!r) continue;
     const first = r.locs[0] || {};
-    rows.push([r.key, p.name, p.row, r.status, first.name || '', first.addr || '', r.locs.length,
-      first.cuisine || '', overallStatus_(r.locs), r.query, r.at, JSON.stringify(r.locs)]);
+    rows.push([r.key, p.name, p.row, r.status, r.visited || '', r.verdict || '', r.dealsSeen || '',
+      r.visitNotes || '', first.name || '', first.addr || '', r.locs.length, first.cuisine || '',
+      overallStatus_(r.locs), r.query, r.at, JSON.stringify(r.locs)]);
     colors.push(STATUS_COLORS[r.status] || null);
   }
+  return { rows, colors };
+}
+
+/** Rewrites the tab in sheet order. Places no longer in the list (or moved to AVOID) drop off. */
+function writeAppData_(data, places) {
+  const ss = SpreadsheetApp.getActive();
+  const sheet = ss.getSheetByName(DATA_TAB) || ss.insertSheet(DATA_TAB);
+  const { rows, colors } = dataToRows_(data, places);
+  const statusCol = DATA_HEADERS.indexOf('Status') + 1;
   sheet.clearContents();
   sheet.getRange(1, 1, 1, DATA_HEADERS.length).setValues([DATA_HEADERS]).setFontWeight('bold');
   sheet.setFrozenRows(1);
   if (!rows.length) return;
   sheet.getRange(2, 1, rows.length, DATA_HEADERS.length).setValues(rows);
-  sheet.getRange(2, 4, sheet.getMaxRows() - 1, 1).setBackground(null);
-  sheet.getRange(2, 4, rows.length, 1).setBackgrounds(colors.map(c => [c]));
+  // The status colors may sit in a different column than before, so clear the whole body first.
+  sheet.getRange(2, 1, sheet.getMaxRows() - 1, sheet.getMaxColumns()).setBackground(null);
+  sheet.getRange(2, statusCol, rows.length, 1).setBackgrounds(colors.map(c => [c]));
 }
 
 function json_(obj) {

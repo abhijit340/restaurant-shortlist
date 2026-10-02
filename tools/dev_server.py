@@ -61,12 +61,41 @@ class Handler(SimpleHTTPRequestHandler):
                     else {"lat": 47.6205, "lng": -122.3212, "label": f"{q.title()}, Seattle, WA, USA"})
         else:
             body = json.loads((ROOT / "tests" / "mock_exec.json").read_text(encoding="utf-8"))
+            for place in body["places"]:
+                place["visit"] = VISITS.get(place["key"])
+        self.send_json(body)
+
+    def do_POST(self):
+        """Fake "mark visited": visits are kept in memory until the server restarts."""
+        if urlparse(self.path).path != "/mock-exec":
+            return self.send_error(404)
+        req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+        if req.get("key") != "test":
+            body = {"error": "bad-key"}
+        elif req.get("action") != "visit":
+            body = {"error": "bad-request"}
+        elif req.get("place") == "unplaced bakery":
+            body = {"error": "busy"}  # lets the app's "Sheet is busy" message be tested
+        else:
+            if req.get("verdict") in ("Loved", "Good", "Meh"):
+                first = VISITS.get(req["place"], {}).get("date", "2026-10-02")
+                VISITS[req["place"]] = {"date": first, "verdict": req["verdict"],
+                                        "deals": req.get("deals", "").strip(), "notes": req.get("notes", "").strip()}
+            else:
+                VISITS.pop(req["place"], None)
+            body = {"ok": True, "visit": VISITS.get(req["place"])}
+        self.send_json(body)
+
+    def send_json(self, body):
         data = json.dumps(body).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+
+VISITS = {}  # place key -> visit, for the fake script
 
 
 if __name__ == "__main__":

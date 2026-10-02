@@ -18,3 +18,4 @@ tests/appdata_fixture.json
 
 # clasp: ties this folder to the Sheet's script (kept local)
 .clasp.json
+tests/appdata_rows.json

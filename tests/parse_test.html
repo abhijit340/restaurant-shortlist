@@ -65,8 +65,9 @@ const g = (name, lat, status = 'OPERATIONAL', periods = []) => ({
 (async () => {
   const code = await (await fetch('../apps-script/Code.gs')).text();
   const { parseSheet, buildQuery_, toRecord_, namesMatch_, overallStatus_, needsLookup_, withAppData_, parseMatrix_, parseLatLng_,
-    pickStale_, refreshFromDetails_, refreshFromSearch_, departureTime_, matrixRequest_, parseGeocode_ } =
-    new Function(code + '\nreturn { parseSheet, buildQuery_, toRecord_, namesMatch_, overallStatus_, needsLookup_, withAppData_, parseMatrix_, parseLatLng_, pickStale_, refreshFromDetails_, refreshFromSearch_, departureTime_, matrixRequest_, parseGeocode_ };')();
+    pickStale_, refreshFromDetails_, refreshFromSearch_, departureTime_, matrixRequest_, parseGeocode_,
+    rowsToData_, dataToRows_, applyVisit_, visitOf_, carryVisit_, DATA_HEADERS } =
+    new Function(code + '\nreturn { parseSheet, buildQuery_, toRecord_, namesMatch_, overallStatus_, needsLookup_, withAppData_, parseMatrix_, parseLatLng_, pickStale_, refreshFromDetails_, refreshFromSearch_, departureTime_, matrixRequest_, parseGeocode_, rowsToData_, dataToRows_, applyVisit_, visitOf_, carryVisit_, DATA_HEADERS };')();
   const places = parseSheet(SYNTHETIC);
   const find = (k) => places.find(p => p.key === k);
 
@@ -183,6 +184,33 @@ const g = (name, lat, status = 'OPERATIONAL', periods = []) => ({
     ['geocode: Google error passed on', geo('REQUEST_DENIED').error === 'geocode REQUEST_DENIED' && parseGeocode_(500, '').error === 'geocode failed (500)'],
   );
 
+  // ----- Mark visited, and the "app data" tab layout -----
+  const OLD_HEADER = ['key', 'Your name', 'Sheet row', 'Status', 'Google name', 'Address', 'Locations',
+    'Cuisine (Google)', 'Open/closed', 'Searched for', 'Looked up', 'data (JSON)'];
+  const oldRow = ['echo eatery', 'Echo Eatery', 9, ' OK ', 'Echo Eatery', '1 St', 1, 'Cafe', 'open', 'Echo Eatery fremont', '2026-09-30', JSON.stringify([loc1])];
+  const fromOld = rowsToData_(OLD_HEADER, [oldRow, ['', '', '', '', '', '', '', '', '', '', '', '']]);
+  const recOld = fromOld.get('echo eatery');
+  const visited = applyVisit_(recOld, { verdict: 'Loved', deals: '  $5 drafts till 6 ', notes: 'x'.repeat(600) }, '2026-10-02');
+  const edited = applyVisit_(visited, { verdict: 'Meh', deals: '', notes: 'changed' }, '2026-11-11');
+  const written = dataToRows_(new Map([['echo eatery', visited]]), [P('Echo Eatery', 'fremont')]);
+  const backAgain = rowsToData_(DATA_HEADERS, written.rows).get('echo eatery');
+  checks.push(
+    ['tab: old layout read by header name', recOld.query === 'Echo Eatery fremont' && recOld.at === '2026-09-30' && recOld.locs.length === 1],
+    ['tab: typed status normalised, blank rows skipped', recOld.status === 'ok' && fromOld.size === 1],
+    ['tab: old layout has no visit', recOld.verdict === '' && visitOf_(recOld) === null],
+    ['visit: saved with today\'s date, text trimmed and capped', visited.visited === '2026-10-02' && visited.dealsSeen === '$5 drafts till 6' && visited.visitNotes.length === 500],
+    ['visit: editing keeps the first date', edited.visited === '2026-10-02' && edited.verdict === 'Meh' && edited.visitNotes === 'changed'],
+    ['visit: no verdict clears it', applyVisit_(visited, { verdict: '' }, 'x').verdict === '' && applyVisit_(visited, { verdict: 'Amazing' }, 'x').visited === ''],
+    ['visit: other fields untouched', visited.status === 'ok' && visited.locs.length === 1 && visited.query === recOld.query],
+    ['visit: what the app receives', JSON.stringify(visitOf_(edited)) === '{"date":"2026-10-02","verdict":"Meh","deals":"","notes":"changed"}'],
+    ['visit: a Sheets date object is sent as text', visitOf_({ verdict: 'Good', visited: new Date('2026-10-02T12:00:00Z') }).date === '2026-09-30'],
+    ['tab: new layout has every header, in order', written.rows[0].length === DATA_HEADERS.length && written.rows[0][DATA_HEADERS.indexOf('Verdict')] === 'Loved'],
+    ['tab: write then read gives the same record', backAgain.verdict === 'Loved' && backAgain.visited === '2026-10-02' && backAgain.status === 'ok' && backAgain.query === recOld.query && JSON.stringify(backAgain.locs) === JSON.stringify(recOld.locs)],
+    ['visit: survives a fresh Google lookup', carryVisit_({ status: 'ok', locs: [] }, visited).verdict === 'Loved'],
+    ['visit: a rate-limited lookup is left alone', !('verdict' in carryVisit_({ status: 'retry' }, visited))],
+    ['visit: app gets it with the place', withAppData_([P('Echo Eatery')], new Map([['echo eatery', visited]]))[0].visit.verdict === 'Loved'],
+  );
+
   // ----- Deals reader (deals.js), with made-up wording -----
   await new Promise((ok, fail) => { const s = document.createElement('script'); s.src = '../deals.js'; s.onload = ok; s.onerror = fail; document.head.append(s); });
   const D = (text) => Deals.parseDeals(text).windows.map(Deals.describeWindow).join('; ');
@@ -224,6 +252,26 @@ const g = (name, lat, status = 'OPERATIONAL', periods = []) => ({
     ul.appendChild(li);
   }
   window.testResult = { failed: checks.filter(c => !c[1]).map(c => c[0]) };
+
+  // Real-tab migration check (local file, never committed): every row of the existing
+  // "app data" tab must survive being read in the old layout and written in the new one.
+  const tabRes = await fetch('appdata_rows.json');
+  if (tabRes.ok) {
+    const [header, ...rows] = await tabRes.json();
+    const before = rowsToData_(header, rows);
+    const fakePlaces = [...before.values()].map(r => ({ key: r.key, name: r.name, row: r.row }));
+    const after = rowsToData_(DATA_HEADERS, dataToRows_(before, fakePlaces).rows);
+    const same = [...before.values()].every(r => {
+      const a = after.get(r.key);
+      return a && a.status === r.status && a.query === r.query && String(a.at) === String(r.at) && JSON.stringify(a.locs) === JSON.stringify(r.locs);
+    });
+    const li = document.createElement('li');
+    li.className = same && after.size === before.size ? 'pass' : 'fail';
+    li.textContent = `${li.className === 'pass' ? 'PASS' : 'FAIL'}  real tab: ${before.size} rows survive the layout change unchanged`;
+    document.getElementById('checks').appendChild(li);
+    window.testResult.migration = { rows: before.size, same, sizeAfter: after.size };
+    if (li.className === 'fail') window.testResult.failed.push('real tab migration');
+  }
 
   const res = await fetch('fixture.json');
   if (!res.ok) return;
