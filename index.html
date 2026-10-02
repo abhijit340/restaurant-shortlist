@@ -181,7 +181,7 @@
   <button id="more" hidden>Show more</button>
 
   <footer>
-    v0.15<span id="reconnect" hidden> · <button class="link">Change Sheet connection</button></span>
+    v0.16<span id="reconnect" hidden> · <button class="link">Change Sheet connection</button></span>
   </footer>
 </main>
 
@@ -534,10 +534,14 @@
   const LEAFLET = "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min";
   const PIN = { boost: "#e0a100", open: "#1f6f5c", closed: "#9a9a94", you: "#2b6fd6" };
   const SEATTLE = { lat: 47.6062, lng: -122.3321 };
+  // Google's library that merges nearby pins into count bubbles when zoomed out.
+  const CLUSTERER = "https://cdn.jsdelivr.net/npm/@googlemaps/markerclusterer@2.5.3/dist/index.min.js";
+  const CLUSTER_UP_TO_ZOOM = 13; // the map opens at 14, so nearby places show as individual pins
   let map = null, mapLoading = null, mapCenteredOn = null;
   let pinLayer = null;   // Leaflet's pins
   let gPins = new Map(); // Google's pins, by place key: { marker, pin, look }
   let gHere = null;      // Google's "you" pin
+  let gCluster = null;   // merges Google's pins into bubbles when zoomed out
 
   // ?gmaps tries Google's map without a key (it works, with a "development" watermark), for testing.
   const useGoogle = () => !state.mapKeyRejected && (Boolean(state.mapsKey) || params.has("gmaps"));
@@ -569,7 +573,7 @@
       window.gm_authFailure = useBackupMap;
       const key = state.mapsKey ? `key=${encodeURIComponent(state.mapsKey)}&` : "";
       addScript(`https://maps.googleapis.com/maps/api/js?${key}v=weekly&loading=async&callback=__mapsReady`).catch(fail);
-    });
+    }).then(() => addScript(CLUSTERER).catch(() => {})); // clustering is a nicety; carry on without it
   }
 
   /** Google refused the key: throw away its (blank) map and draw the free one instead. */
@@ -578,6 +582,7 @@
     state.mapNote = "Google rejected the map key, so this is the backup map. In Google Cloud, check the key's website restriction (https://abhijit340.github.io/*), that Maps JavaScript API is enabled and ticked for the key, and wait a few minutes if the key is new.";
     gPins = new Map();
     gHere = null;
+    gCluster = null;
     map = null;
     mapLoading = null;
     mapCenteredOn = null;
@@ -652,6 +657,18 @@
     return pinIcons[id];
   }
 
+  /** A bubble standing for several nearby places: gold if any has a deal on (or is inKind). */
+  function clusterBubble({ count, position, markers }) {
+    const d = count < 10 ? 30 : count < 100 ? 36 : 42;
+    const color = markers.some((m) => m.hasDeal) ? PIN.boost : "#14493d";
+    return new google.maps.Marker({
+      position,
+      icon: pinIcon(color, false, d),
+      label: { text: String(count), color: "#fff", fontSize: "12px", fontWeight: "700" },
+      zIndex: 500 + count,
+    });
+  }
+
   function drawGoogle(pins, tapPin, recenter) {
     const G = google.maps;
     const at = (pt) => ({ lat: pt.lat, lng: pt.lng }); // Google wants only these two fields
@@ -665,7 +682,17 @@
       const spot = (e) => ({ lat: e.latLng.lat(), lng: e.latLng.lng() });
       map.addListener("click", (e) => { if (state.picking) startFrom(spot(e)); });
       map.addListener("contextmenu", (e) => startFrom(spot(e))); // press and hold
+      if (window.markerClusterer) {
+        gCluster = new markerClusterer.MarkerClusterer({
+          map,
+          algorithm: new markerClusterer.SuperClusterAlgorithm({ maxZoom: CLUSTER_UP_TO_ZOOM, radius: 70 }),
+          renderer: { render: clusterBubble },
+        });
+      }
     }
+    // With clustering the library decides which pins are on the map; without it, all are.
+    const show = (marker) => (gCluster ? gCluster.addMarker(marker, true) : marker.setMap(map));
+    const hide = (marker) => (gCluster ? gCluster.removeMarker(marker, true) : marker.setMap(null));
 
     // Reuse pins between redraws: only add new places, restyle changed ones, and
     // remove ones that were filtered out. A pin tap then touches two pins, not all of them.
@@ -676,19 +703,22 @@
       seen.add(key);
       let entry = gPins.get(key);
       if (!entry) {
-        entry = { marker: new G.Marker({ map, optimized: true }), look: "" };
+        entry = { marker: new G.Marker({ optimized: true }), look: "" };
         entry.marker.addListener("click", () => tapPin(entry.pin));
         gPins.set(key, entry);
+        show(entry.marker);
       }
       entry.pin = pin; // the click handler always sees the latest details
       if (entry.look !== look) {
         entry.look = look;
         entry.marker.setOptions({ position: at(pin), icon: pinIcon(pin.color, pin.selected), zIndex: pin.selected ? 1000 : 1 });
+        entry.marker.hasDeal = pin.color === PIN.boost; // lets a bubble show there's a deal inside
       }
     }
     for (const [key, entry] of gPins) {
-      if (!seen.has(key)) { entry.marker.setMap(null); gPins.delete(key); }
+      if (!seen.has(key)) { hide(entry.marker); gPins.delete(key); }
     }
+    if (gCluster) gCluster.render();
 
     if (state.here) {
       gHere ||= new G.Marker({ map, clickable: false, zIndex: 999, icon: pinIcon(PIN.you, false, 22) });
