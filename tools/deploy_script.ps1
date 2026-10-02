@@ -18,6 +18,10 @@ if ($ids.Count -ne 1) {
     throw "Expected exactly one versioned deployment, found $($ids.Count):`n$deployments"
 }
 
+# Never publish a script that could change the human-edited restaurant tab.
+python "$PSScriptRoot\check_sheet_writes.py"
+if ($LASTEXITCODE -ne 0) { throw "Publish blocked: the script could change the restaurant tab (see above)." }
+
 clasp push --force
 if ($LASTEXITCODE -ne 0) { throw "clasp push failed" }
 
