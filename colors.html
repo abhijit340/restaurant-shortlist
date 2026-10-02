@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Nearby Eats colors</title>
+  <meta name="theme-color" content="#1f6f5c">
+  <link rel="icon" href="icons/icon-192.png">
+  <style>
+    /* Page chrome follows the theme currently in use (set by themes.js). */
+    :root { --bg: #f6f4ef; --card: #ffffff; --text: #1d1d1b; --muted: #6b6b66; --accent: #1f6f5c; --accent-text: #ffffff; --border: #e2dfd7; }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg: #151714; --card: #1f221e; --text: #ecebe6; --muted: #a3a39c; --accent: #4fb89c; --accent-text: #0e1a16; --border: #33372f; }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: var(--bg); color: var(--text);
+      font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      padding: max(16px, env(safe-area-inset-top)) 16px 40px;
+    }
+    main { max-width: 900px; margin: 0 auto; }
+    h1 { font-size: 1.5rem; margin: 8px 0 4px; }
+    h2 { font-size: 1.2rem; margin: 0; }
+    a { color: var(--accent); }
+    .muted { color: var(--muted); margin: 4px 0 0; }
+    .theme { margin-top: 28px; padding-top: 20px; border-top: 1px solid var(--border); }
+    .theme-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+    .use {
+      padding: 10px 16px; font-size: .95rem; font-weight: 600; border: 0; border-radius: 12px;
+      background: var(--accent); color: var(--accent-text);
+    }
+    .use[disabled] { background: none; color: var(--muted); border: 1px solid var(--border); }
+    .pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; margin-top: 12px; }
+
+    /* A miniature of the app, colored only by the variables set on .sample. */
+    .sample { background: var(--bg); color: var(--text); border-radius: 16px; padding: 14px; border: 1px solid var(--border); }
+    .sample .mode { font-size: .72rem; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 0 0 8px; }
+    .sample .top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+    .sample .title { font-size: 1.15rem; font-weight: 700; }
+    .sample .btn { padding: 8px 12px; font-weight: 600; font-size: .9rem; border-radius: 10px; background: var(--accent); color: var(--accent-text); }
+    .sample .row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+    .sample .toggle { padding: 6px 10px; font-size: .82rem; border-radius: 999px; background: var(--card); border: 1px solid var(--border); }
+    .sample .toggle.on { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+    .sample .plan { padding: 8px 10px; font-size: .85rem; font-weight: 600; border-radius: 10px; margin-top: 8px;
+      background: var(--card); border: 1px solid var(--accent); color: var(--accent); }
+    .sample .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; margin-top: 10px; }
+    .sample .name { display: flex; justify-content: space-between; gap: 10px; font-weight: 700; }
+    .sample .dist { color: var(--accent); white-space: nowrap; }
+    .sample p { margin: 4px 0 0; }
+    .sample .meta { color: var(--muted); font-size: .88rem; }
+    .sample .meta b { color: var(--text); }
+    .sample .warn { color: var(--warn); font-size: .88rem; font-weight: 600; }
+    .sample .closed { color: var(--error); font-size: .88rem; font-weight: 600; }
+    .sample .deal { color: var(--accent); font-size: .88rem; font-weight: 600; }
+    .sample .chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+    .sample .chip { font-size: .74rem; padding: 2px 8px; border-radius: 999px; background: var(--chip); }
+    .sample .chip.star { background: var(--star-bg); color: var(--star); }
+    .sample .chip.fav { background: var(--fav-bg); color: var(--fav); }
+    .sample .visit { display: inline-block; margin-top: 8px; padding: 6px 10px; font-size: .8rem; border-radius: 999px; border: 1px solid var(--border); }
+    .sample .pins { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; margin-top: 10px; font-size: .8rem; color: var(--muted); }
+    .sample .dot { display: inline-block; width: 12px; height: 12px; border-radius: 50%; border: 2px solid #fff; margin-right: 4px; vertical-align: -2px; }
+  </style>
+</head>
+<body>
+<main>
+  <p><a href="./">← Back to the list</a></p>
+  <h1>Colors</h1>
+  <p class="muted">Each set is shown the way the app looks in light mode and in dark mode (your phone's own setting decides which you get). Tap <b>Use this in the app</b> to try one on the real list; it's saved on this phone only, and you can switch back any time.</p>
+  <div id="themes"></div>
+</main>
+
+<script src="themes.js"></script>
+<script>
+  const { THEMES, vars, applyTheme, savedThemeId, saveThemeId } = Themes;
+
+  // Builds an element with text set safely.
+  function el(tag, className = "", text = "") {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text) node.textContent = text;
+    return node;
+  }
+
+  /** One miniature app screen in the given colors. */
+  function sample(theme, mode) {
+    const s = el("div", "sample");
+    s.style.cssText = vars(theme[mode]);
+    s.append(el("p", "mode", mode === "light" ? "Light mode" : "Dark mode"));
+
+    const top = el("div", "top");
+    top.append(el("span", "title", "Nearby Eats"), el("span", "btn", "Refresh"));
+    s.append(top, el("div", "plan", "📍 Capitol Hill, Seattle · Sat 4:30 PM"));
+
+    const row = el("div", "row");
+    row.append(el("span", "toggle on", "All"), el("span", "toggle", "To try"), el("span", "toggle", "⭐ Loved"), el("span", "toggle", "🍹 Deals"));
+    s.append(row);
+
+    const a = el("div", "card");
+    const name = el("div", "name");
+    name.append(el("span", "", "Sample Oyster House"), el("span", "dist", "17 min 🚌"));
+    const travel = el("p", "meta");
+    travel.append(el("b", "", "🚌 17 min"), " or 🚶 22 min walk · arrive ~4:47 PM");
+    const chips = el("div", "chips");
+    chips.append(el("span", "chip star", "⭐ Been & loved"), el("span", "chip fav", "💚 Favorite"),
+      el("span", "chip fav", "💳 inKind"), el("span", "chip fav", "✓ Visited · Loved"), el("span", "chip", "Market Hall"));
+    a.append(name, el("p", "", "oysters, small plates, cocktails"), travel,
+      el("p", "warn", "⚠️ Closes 5:30 PM · you'd have only 43 min"),
+      el("p", "deal", "🍹 Happy hour on when you'd arrive · until 5:00 PM"),
+      el("p", "meta", "📍 ballard · 🍽 Menu"), chips, el("span", "visit", "✎ Edit visit"));
+
+    const b = el("div", "card");
+    const name2 = el("div", "name");
+    name2.append(el("span", "", "Late Lunch Spot"), el("span", "dist", "0.4 mi"));
+    b.append(name2, el("p", "", "sandwiches"), el("p", "closed", "🔴 Closed when you'd arrive · opens Sun 11:00 AM"));
+
+    const pins = el("div", "pins");
+    for (const [color, label] of [["#e0a100", "deal or inKind"], [theme.pins.open, "open"], ["#9a9a94", "closed"], [theme.pins.you, "you"]]) {
+      const item = el("span");
+      const dot = el("span", "dot");
+      dot.style.background = color;
+      item.append(dot, label);
+      pins.append(item);
+    }
+    const pinLabel = el("p", "meta", "Map pins:");
+    pinLabel.style.marginTop = "10px";
+    s.append(a, b, pinLabel, pins);
+    return s;
+  }
+
+  function draw() {
+    const current = savedThemeId();
+    applyTheme(current);
+    const out = document.getElementById("themes");
+    out.replaceChildren();
+    for (const [id, theme] of Object.entries(THEMES)) {
+      const section = el("section", "theme");
+      const head = el("div", "theme-head");
+      const title = el("div");
+      title.append(el("h2", "", theme.name), el("p", "muted", theme.blurb));
+      const use = el("button", "use", id === current ? "✓ In use on this phone" : "Use this in the app");
+      use.disabled = id === current;
+      use.addEventListener("click", () => { saveThemeId(id); draw(); });
+      head.append(title, use);
+      const pair = el("div", "pair");
+      pair.append(sample(theme, "light"), sample(theme, "dark"));
+      section.append(head, pair);
+      out.append(section);
+    }
+  }
+  draw();
+</script>
+</body>
+</html>

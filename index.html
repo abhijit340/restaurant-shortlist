@@ -187,10 +187,10 @@
     <p class="hint" id="map-hint"></p>
     <div id="map"></div>
     <p class="hint legend">
-      <span class="dot" style="background:#e0a100"></span>deal or inKind
-      <span class="dot" style="background:#1f6f5c"></span>open
-      <span class="dot" style="background:#9a9a94"></span>closed on arrival
-      <span class="dot" style="background:#2b6fd6"></span>you
+      <span class="dot" data-pin="boost"></span>deal or inKind
+      <span class="dot" data-pin="open"></span>open
+      <span class="dot" data-pin="closed"></span>closed on arrival
+      <span class="dot" data-pin="you"></span>you
     </p>
     <div id="map-card"></div>
   </div>
@@ -200,7 +200,7 @@
   <button id="more" hidden>Show more</button>
 
   <footer>
-    v0.20 · <a href="help.html">Help</a><span id="reconnect" hidden> · <button class="link" id="share">Share setup link</button> · <button class="link" id="reconnect-btn">Change Sheet connection</button></span>
+    v0.21 · <a href="help.html">Help</a> · <a href="colors.html">Colors</a><span id="reconnect" hidden> · <button class="link" id="share">Share setup link</button> · <button class="link" id="reconnect-btn">Change Sheet connection</button></span>
   </footer>
 </main>
 
@@ -227,8 +227,12 @@
   </form>
 </dialog>
 
+<script src="themes.js"></script>
 <script src="deals.js"></script>
 <script>
+  // Colors first, so the page never flashes the default set.
+  const theme = Themes.applyTheme(Themes.savedThemeId());
+
   const $ = (id) => document.getElementById(id);
   const CONFIG_KEY = "nearbyeats.config";
   const FILTERS_KEY = "nearbyeats.filters";
@@ -626,7 +630,8 @@
   // OpenStreetMap map (Leaflet). Both show the same pins and behave the same.
 
   const LEAFLET = "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min";
-  const PIN = { boost: "#e0a100", open: "#1f6f5c", closed: "#9a9a94", you: "#2b6fd6" };
+  const PIN = { boost: "#e0a100", open: theme.pins.open, closed: "#9a9a94", you: theme.pins.you };
+  document.querySelectorAll("[data-pin]").forEach((dot) => { dot.style.background = PIN[dot.dataset.pin]; });
   const SEATTLE = { lat: 47.6062, lng: -122.3321 };
   // Google's library that merges nearby pins into count bubbles when zoomed out.
   const CLUSTERER = "https://cdn.jsdelivr.net/npm/@googlemaps/markerclusterer@2.5.3/dist/index.min.js";
@@ -754,7 +759,7 @@
   /** A bubble standing for several nearby places: gold if any has a deal on (or is inKind). */
   function clusterBubble({ count, position, markers }) {
     const d = count < 10 ? 30 : count < 100 ? 36 : 42;
-    const color = markers.some((m) => m.hasDeal) ? PIN.boost : "#14493d";
+    const color = markers.some((m) => m.hasDeal) ? PIN.boost : PIN.open;
     return new google.maps.Marker({
       position,
       icon: pinIcon(color, false, d),
