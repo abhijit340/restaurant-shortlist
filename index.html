@@ -61,6 +61,9 @@
     }
     .toggle[aria-pressed="true"] { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
     .row select { width: auto; padding: 8px 12px; font-size: .9rem; border-radius: 999px; }
+    .searchrow { display: flex; gap: 6px; }
+    .searchrow input { flex: 1; width: auto; min-width: 0; }
+    .searchrow button { white-space: nowrap; border-radius: 10px; }
     .plan-toggle { text-align: left; border-radius: 12px; padding: 10px 12px; }
     .plan-toggle.planned { border-color: var(--accent); color: var(--accent); font-weight: 600; }
     #plan-form { margin-top: 0; }
@@ -148,7 +151,10 @@
         <button type="button" class="link" id="plan-reset">Back to here and now</button>
       </div>
     </form>
-    <input id="q" type="search" placeholder="Search: sushi, brunch, ballard…" autocomplete="off">
+    <div class="searchrow">
+      <input id="q" type="search" placeholder="Search: sushi, brunch, ballard…" autocomplete="off">
+      <button class="toggle" id="clear" hidden>✕ Clear filters</button>
+    </div>
     <div class="row">
       <button class="toggle" data-section="all" aria-pressed="true">All</button>
       <button class="toggle" data-section="try" aria-pressed="false">To try</button>
@@ -193,7 +199,7 @@
   <button id="more" hidden>Show more</button>
 
   <footer>
-    v0.17<span id="reconnect" hidden> · <button class="link">Change Sheet connection</button></span>
+    v0.18<span id="reconnect" hidden> · <button class="link">Change Sheet connection</button></span>
   </footer>
 </main>
 
@@ -239,13 +245,15 @@
   // "Now" for everything time-related: the planned time when planning ahead.
   const now = () => (state.plan.when ? new Date(state.plan.when) : realNow());
 
+  const NO_FILTERS = { q: "", section: "all", fav: false, deals: false, unvisited: false, tag: "", open: false, max: 0 };
+
   const state = {
     places: [],
     here: null,        // { lat, lng, acc } once we know where you are (or the planned start)
     hereError: "",
     plan: { place: null, when: null },  // place: { query, label, lat, lng }; when: ms. null = here / now
     geocoded: {},                       // typed places already looked up this session
-    filters: { q: "", section: "all", fav: false, deals: false, unvisited: false, tag: "", open: false, max: 0 },
+    filters: { ...NO_FILTERS },
     shown: PAGE,
     times: { origin: null, at: 0, byKey: {} },  // travel times, keyed by place
     timesLoading: false,
@@ -564,7 +572,7 @@
     if (!list.length) {
       const empty = el("p", "empty", "Nothing matches these filters. ");
       const clear = el("button", "link", "Clear filters");
-      clear.addEventListener("click", () => setFilter({ q: "", section: "all", fav: false, deals: false, unvisited: false, tag: "", open: false, max: 0 }));
+      clear.addEventListener("click", () => setFilter({ ...NO_FILTERS }));
       empty.append(clear);
       out.append(empty);
     }
@@ -1030,6 +1038,9 @@
     const f = state.filters;
     $("q").value = f.q;
     $("max").value = String(f.max || 0);
+    $("tag").value = f.tag;
+    // The Clear button shows only while something is filtering the list.
+    $("clear").hidden = Object.keys(NO_FILTERS).every((k) => f[k] === NO_FILTERS[k]);
     document.querySelectorAll("[data-section]").forEach((b) => b.setAttribute("aria-pressed", b.dataset.section === f.section));
     document.querySelectorAll("[data-flag]").forEach((b) => b.setAttribute("aria-pressed", Boolean(f[b.dataset.flag])));
   }
@@ -1050,6 +1061,7 @@
   $("tag").addEventListener("change", (e) => setFilter({ tag: e.target.value }));
   $("max").addEventListener("change", (e) => setFilter({ max: Number(e.target.value) }));
   $("more").addEventListener("click", () => { state.shown += PAGE; render(); });
+  $("clear").addEventListener("click", () => setFilter({ ...NO_FILTERS }));
 
   // ---------- Setup ----------
 
