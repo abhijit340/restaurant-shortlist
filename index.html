@@ -181,7 +181,7 @@
   <button id="more" hidden>Show more</button>
 
   <footer>
-    v0.14<span id="reconnect" hidden> · <button class="link">Change Sheet connection</button></span>
+    v0.15<span id="reconnect" hidden> · <button class="link">Change Sheet connection</button></span>
   </footer>
 </main>
 
@@ -516,11 +516,11 @@
       empty.append(clear);
       out.append(empty);
     }
-    for (const x of list.slice(0, state.shown)) out.append(card(x));
-    $("more").textContent = `Show more (${list.length - state.shown} left)`;
-
-    // 6. List or map: the same filtered places either way.
+    // 6. List or map: the same filtered places either way. (The list's cards aren't
+    //    built while the map is showing; that work would be wasted.)
     const mapMode = state.view === "map";
+    if (!mapMode) for (const x of list.slice(0, state.shown)) out.append(card(x));
+    $("more").textContent = `Show more (${list.length - state.shown} left)`;
     out.hidden = mapMode;
     $("more").hidden = mapMode || list.length <= state.shown;
     $("mapwrap").hidden = !mapMode;
@@ -536,7 +536,8 @@
   const SEATTLE = { lat: 47.6062, lng: -122.3321 };
   let map = null, mapLoading = null, mapCenteredOn = null;
   let pinLayer = null;   // Leaflet's pins
-  let gMarkers = [];     // Google's pins
+  let gPins = new Map(); // Google's pins, by place key: { marker, pin, look }
+  let gHere = null;      // Google's "you" pin
 
   // ?gmaps tries Google's map without a key (it works, with a "development" watermark), for testing.
   const useGoogle = () => !state.mapKeyRejected && (Boolean(state.mapsKey) || params.has("gmaps"));
@@ -575,7 +576,8 @@
   function useBackupMap() {
     state.mapKeyRejected = true;
     state.mapNote = "Google rejected the map key, so this is the backup map. In Google Cloud, check the key's website restriction (https://abhijit340.github.io/*), that Maps JavaScript API is enabled and ticked for the key, and wait a few minutes if the key is new.";
-    gMarkers = [];
+    gPins = new Map();
+    gHere = null;
     map = null;
     mapLoading = null;
     mapCenteredOn = null;
@@ -630,8 +632,29 @@
     $("map-card").replaceChildren(...(chosen ? [card(chosen)] : []));
   }
 
+  // A round pin as a small image. Image pins let Google draw all of them on one
+  // layer, which stays smooth with hundreds of places (vector symbols don't).
+  const pinIcons = {};
+  function pinIcon(color, selected, size = 20) {
+    const d = selected ? 28 : size;
+    const id = `${color}|${d}|${selected}`;
+    if (!pinIcons[id]) {
+      const stroke = selected ? "#111" : "#fff";
+      const w = selected ? 3 : 2;
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${d}" height="${d}">` +
+        `<circle cx="${d / 2}" cy="${d / 2}" r="${d / 2 - w}" fill="${color}" stroke="${stroke}" stroke-width="${w}"/></svg>`;
+      pinIcons[id] = {
+        url: "data:image/svg+xml;charset=UTF-8," + encodeURIComponent(svg),
+        scaledSize: new google.maps.Size(d, d),
+        anchor: new google.maps.Point(d / 2, d / 2),
+      };
+    }
+    return pinIcons[id];
+  }
+
   function drawGoogle(pins, tapPin, recenter) {
     const G = google.maps;
+    const at = (pt) => ({ lat: pt.lat, lng: pt.lng }); // Google wants only these two fields
     if (!map) {
       map = new G.Map($("map"), {
         center: SEATTLE, zoom: 12,
@@ -643,20 +666,38 @@
       map.addListener("click", (e) => { if (state.picking) startFrom(spot(e)); });
       map.addListener("contextmenu", (e) => startFrom(spot(e))); // press and hold
     }
-    const at = (pt) => ({ lat: pt.lat, lng: pt.lng }); // Google wants only these two fields
-    const dot = (color, selected, size = 8) => ({
-      path: G.SymbolPath.CIRCLE, scale: selected ? 11 : size, fillColor: color, fillOpacity: 0.95,
-      strokeColor: selected ? "#111" : "#fff", strokeWeight: selected ? 3 : 2,
-    });
-    gMarkers.forEach((m) => m.setMap(null));
-    gMarkers = pins.map((pin) => {
-      const m = new G.Marker({ map, position: at(pin), icon: dot(pin.color, pin.selected), zIndex: pin.selected ? 1000 : 1, title: pin.x.p.name });
-      m.addListener("click", () => tapPin(pin));
-      return m;
-    });
-    if (state.here) {
-      gMarkers.push(new G.Marker({ map, position: at(state.here), icon: dot(PIN.you, false, 9), clickable: false, zIndex: 999 }));
+
+    // Reuse pins between redraws: only add new places, restyle changed ones, and
+    // remove ones that were filtered out. A pin tap then touches two pins, not all of them.
+    const seen = new Set();
+    for (const pin of pins) {
+      const key = pin.x.p.key;
+      const look = `${pin.lat},${pin.lng},${pin.color},${pin.selected}`;
+      seen.add(key);
+      let entry = gPins.get(key);
+      if (!entry) {
+        entry = { marker: new G.Marker({ map, optimized: true }), look: "" };
+        entry.marker.addListener("click", () => tapPin(entry.pin));
+        gPins.set(key, entry);
+      }
+      entry.pin = pin; // the click handler always sees the latest details
+      if (entry.look !== look) {
+        entry.look = look;
+        entry.marker.setOptions({ position: at(pin), icon: pinIcon(pin.color, pin.selected), zIndex: pin.selected ? 1000 : 1 });
+      }
     }
+    for (const [key, entry] of gPins) {
+      if (!seen.has(key)) { entry.marker.setMap(null); gPins.delete(key); }
+    }
+
+    if (state.here) {
+      gHere ||= new G.Marker({ map, clickable: false, zIndex: 999, icon: pinIcon(PIN.you, false, 22) });
+      gHere.setPosition(at(state.here));
+      gHere.setMap(map);
+    } else if (gHere) {
+      gHere.setMap(null);
+    }
+
     if (!recenter) return;
     if (state.here) { map.setCenter(at(state.here)); map.setZoom(14); }
     else if (pins.length) {
