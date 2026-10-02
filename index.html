@@ -72,6 +72,10 @@
     #map { height: 58vh; min-height: 320px; margin-top: 8px; border-radius: 12px; border: 1px solid var(--border); z-index: 0; }
     #map-hint.picking { color: var(--accent); font-weight: 600; }
     .legend { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; }
+    #map-card { scroll-margin-bottom: 16px; }
+    @keyframes flash { from { box-shadow: 0 0 0 3px var(--accent); } to { box-shadow: 0 0 0 3px transparent; } }
+    .place.flash { animation: flash 1.2s ease-out; }
+    @media (prefers-reduced-motion: reduce) { .place.flash { animation: none; border-color: var(--accent); } }
     .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; }
 
     /* Place cards: the whole card opens the place in Google Maps (a "stretched" link);
@@ -206,7 +210,7 @@
   <button id="more" hidden>Show more</button>
 
   <footer>
-    v0.23 · <a href="help.html">Help</a> · <a href="colors.html">Colors</a><span id="reconnect" hidden> · <button class="link" id="share">Share setup link</button> · <button class="link" id="reconnect-btn">Change Sheet connection</button></span>
+    v0.24 · <a href="help.html">Help</a> · <a href="colors.html">Colors</a><span id="reconnect" hidden> · <button class="link" id="share">Share setup link</button> · <button class="link" id="reconnect-btn">Change Sheet connection</button></span>
   </footer>
 </main>
 
@@ -722,6 +726,7 @@
     const tapPin = (pin) => {
       if (state.picking) return startFrom(pin);
       state.selectedKey = pin.x.p.key;
+      state.revealCard = true; // scroll to the card once it's drawn
       render();
     };
     // Re-centre only when the starting point changes, so panning around isn't undone.
@@ -740,6 +745,13 @@
 
     const chosen = list.find((x) => x.p.key === state.selectedKey);
     $("map-card").replaceChildren(...(chosen ? [card(chosen)] : []));
+    // After a pin tap, bring its card into view and flash it, so it's clear what was picked.
+    if (chosen && state.revealCard) {
+      const shown = $("map-card").firstElementChild;
+      shown.classList.add("flash");
+      shown.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+    state.revealCard = false;
   }
 
   // A round pin as a small image. Image pins let Google draw all of them on one
