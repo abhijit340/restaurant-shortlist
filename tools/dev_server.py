@@ -76,6 +76,10 @@ class Handler(SimpleHTTPRequestHandler):
             for place in body["places"]:
                 place["visit"] = VISITS.get(place["key"])
                 place["pending"] = place["key"] in PENDING
+                e = {f: {"sheet": place[f], "now": v} for f, v in EDITS.get(place["key"], {}).items()}
+                if e:
+                    place.update({f: x["now"] for f, x in e.items()})
+                place["edited"] = e or None
             body["places"] += ADDED
         self.send_json(body)
 
@@ -98,6 +102,21 @@ class Handler(SimpleHTTPRequestHandler):
                               "struck": False, "added": True, "cuisine": (loc or {}).get("cuisine", ""),
                               "closed": "open" if loc else "", "locs": [loc] if loc else [], "visit": None, "pending": not loc})
                 body = {"ok": True, "key": key}
+        elif req.get("action") == "edit":
+            sheet = next((p for p in json.loads((ROOT / "tests" / "mock_exec.json").read_text(encoding="utf-8"))["places"]
+                          if p["key"] == req.get("place")), None)
+            if not sheet:
+                body = {"error": "no-such-place"}
+            else:
+                mine = EDITS.setdefault(sheet["key"], {})
+                for f in ("desc", "deals"):
+                    now = str(req.get(f, "")).strip()
+                    if now == sheet[f]:
+                        mine.pop(f, None)
+                    else:
+                        mine[f] = now
+                e = {f: {"sheet": sheet[f], "now": v} for f, v in mine.items()}
+                body = {"ok": True, "desc": mine.get("desc", sheet["desc"]), "deals": mine.get("deals", sheet["deals"]), "edited": e or None}
         elif req.get("action") == "fill":
             looked = len(PENDING)
             PENDING.clear()  # pretend Google was asked about every waiting place
@@ -127,6 +146,7 @@ class Handler(SimpleHTTPRequestHandler):
 
 VISITS = {}  # place key -> visit, for the fake script
 ADDED = []   # places "added from the app", for the fake script
+EDITS = {}   # place key -> {field: edited text}, for the fake script
 PENDING = {"unplaced bakery"}  # places "not looked up yet", until the app asks for a lookup
 
 

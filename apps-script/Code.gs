@@ -38,6 +38,7 @@ function doPost(e) {
     if (body.action === 'visit') return json_(saveVisit_(body));
     if (body.action === 'fill') return json_(quickFill_(QUICK_FILL_MAX));
     if (body.action === 'add') return json_(addPlace_(body));
+    if (body.action === 'edit') return json_(saveEdit_(body));
     return json_({ error: 'bad-request' });
   } catch (err) {
     return json_({ error: String(err) });
@@ -883,7 +884,46 @@ function carryVisit_(fresh, old) {
   if (!old || fresh.status === 'retry') return fresh;
   return Object.assign(fresh, {
     visited: old.visited || '', verdict: old.verdict || '', dealsSeen: old.dealsSeen || '', visitNotes: old.visitNotes || '',
+    edits: old.edits || {},
   });
+}
+
+// ---------- Edit a place's notes from the app ----------
+// Edits never touch the restaurant tab. Each is stored in "app data" with the Sheet
+// text it replaced ({ was, now }); if someone later changes that cell in the Sheet,
+// "was" no longer matches and the Sheet's text wins.
+
+const EDITABLE = ['desc', 'deals'];
+
+function saveEdit_(body) {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(15000)) return { error: 'busy' };
+  try {
+    const places = readAllPlaces_();
+    const place = places.find(p => p.key === body.place);
+    if (!place) return { error: 'no-such-place' };
+    const data = readAppData_();
+    const rec = data.get(place.key) ||
+      { key: place.key, name: place.name, row: place.row, status: '', query: '', at: '', locs: [] };
+    data.set(place.key, applyEdit_(rec, place, body));
+    writeAppData_(data, places);
+    const shown = withAppData_([Object.assign({}, place)], data)[0];
+    return { ok: true, desc: shown.desc, deals: shown.deals, edited: shown.edited };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** New edits for a record. Setting a field back to the Sheet's text removes that edit. Pure, testable. */
+function applyEdit_(rec, place, body) {
+  const edits = Object.assign({}, rec.edits || {});
+  for (const f of EDITABLE) {
+    if (!(f in body)) continue;
+    const now = String(body[f] == null ? '' : body[f]).trim().slice(0, 500);
+    if (now === place[f]) delete edits[f];
+    else edits[f] = { was: place[f], now };
+  }
+  return Object.assign({}, rec, { edits });
 }
 
 function needsLookup_(p, rec) {
@@ -914,7 +954,16 @@ function withAppData_(places, data) {
   return places.map(p => {
     const rec = data.get(p.key);
     const locs = rec && rec.status !== 'skip' ? rec.locs : [];
+    // App edits replace the Sheet's text only while the Sheet still says what was edited.
+    const edited = {};
+    for (const f of EDITABLE) {
+      const e = rec && rec.edits && rec.edits[f];
+      if (e && e.was === p[f]) edited[f] = { sheet: p[f], now: e.now };
+    }
     return Object.assign(p, {
+      desc: edited.desc ? edited.desc.now : p.desc,
+      deals: edited.deals ? edited.deals.now : p.deals,
+      edited: Object.keys(edited).length ? edited : null,
       cuisine: locs[0] ? locs[0].cuisine : '',
       closed: overallStatus_(locs),
       locs: locs.filter(l => l.status !== 'CLOSED_PERMANENTLY')
@@ -934,7 +983,7 @@ function today_() { return Utilities.formatDate(new Date(), 'America/Los_Angeles
 // JSON column stays last. Columns are found by header name, so an older tab
 // (different order, fewer columns) still reads correctly.
 const DATA_HEADERS = ['key', 'Your name', 'Sheet row', 'Status', 'Visited', 'Verdict', 'Deals seen',
-  'Visit notes', 'Google name', 'Address', 'Locations', 'Cuisine (Google)', 'Open/closed',
+  'Visit notes', 'Edits (JSON)', 'Google name', 'Address', 'Locations', 'Cuisine (Google)', 'Open/closed',
   'Searched for', 'Last updated', 'data (JSON)'];
 const STATUS_COLORS = { 'not found': '#f4cccc', 'check name': '#fff2cc', 'skip': '#efefef' };
 
@@ -951,7 +1000,7 @@ function rowsToData_(header, rows) {
   const c = {
     key: col('key'), name: col('Your name'), row: col('Sheet row'), status: col('Status'),
     visited: col('Visited'), verdict: col('Verdict'), dealsSeen: col('Deals seen'), visitNotes: col('Visit notes'),
-    query: col('Searched for'), json: col('data (JSON)'),
+    query: col('Searched for'), json: col('data (JSON)'), edits: col('Edits (JSON)'),
     at: Math.max(col('Last updated'), col('Looked up')), // older tabs called it "Looked up"
   };
   const get = (r, i) => (i < 0 || r[i] == null ? '' : r[i]);
@@ -969,9 +1018,14 @@ function rowsToData_(header, rows) {
       query: get(r, c.query), at: get(r, c.at), locs,
       visited: get(r, c.visited), verdict: get(r, c.verdict),
       dealsSeen: get(r, c.dealsSeen), visitNotes: get(r, c.visitNotes),
+      edits: parseEdits_(get(r, c.edits)),
     });
   }
   return map;
+}
+
+function parseEdits_(text) {
+  try { const e = JSON.parse(text || '{}'); return e && typeof e === 'object' ? e : {}; } catch (err) { return {}; }
 }
 
 /** Records → tab rows in sheet order, plus each row's status color. Pure, testable. */
@@ -983,7 +1037,7 @@ function dataToRows_(data, places) {
     if (!r) continue;
     const first = r.locs[0] || {};
     rows.push([r.key, p.name, p.row, r.status, r.visited || '', r.verdict || '', r.dealsSeen || '',
-      r.visitNotes || '', first.name || '', first.addr || '', r.locs.length, first.cuisine || '',
+      r.visitNotes || '', r.edits && Object.keys(r.edits).length ? JSON.stringify(r.edits) : '', first.name || '', first.addr || '', r.locs.length, first.cuisine || '',
       overallStatus_(r.locs), r.query, r.at, JSON.stringify(r.locs)]);
     colors.push(STATUS_COLORS[r.status] || null);
   }

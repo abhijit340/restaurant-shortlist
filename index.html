@@ -229,7 +229,7 @@
   <button id="more" hidden>Show more</button>
 
   <footer>
-    v0.26 · <a href="help.html">Help</a> · <a href="colors.html">Colors</a><span id="reconnect" hidden> · <button class="link" id="share">Share setup link</button> · <button class="link" id="reconnect-btn">Change Sheet connection</button></span>
+    v0.27 · <a href="help.html">Help</a> · <a href="colors.html">Colors</a><span id="reconnect" hidden> · <button class="link" id="share">Share setup link</button> · <button class="link" id="reconnect-btn">Change Sheet connection</button></span>
   </footer>
 </main>
 
@@ -283,6 +283,27 @@
   </form>
   <p class="error" id="add-error" hidden></p>
   <div class="row" style="margin-top:10px"><button type="button" class="link" id="add-cancel">Cancel</button></div>
+</dialog>
+
+<!-- Edit a place's notes. Saved as an app edit; the restaurant tab is never changed. -->
+<dialog id="edit">
+  <form id="edit-form">
+    <strong id="edit-title"></strong>
+    <p class="hint">Saved in the app only. Your restaurant tab isn't changed, and if you later edit that cell in the Sheet, the Sheet wins.</p>
+    <label for="edit-desc">Description</label>
+    <input id="edit-desc" maxlength="500" autocomplete="off">
+    <p class="hint" id="edit-desc-sheet" hidden></p>
+    <label for="edit-deals">Deals / happy hour</label>
+    <input id="edit-deals" maxlength="500" placeholder="e.g. HH m-f 4-6; $2 oysters mondays" autocomplete="off">
+    <p class="hint" id="edit-deals-sheet" hidden></p>
+    <p class="hint" id="edit-reads"></p>
+    <p class="error" id="edit-error" hidden></p>
+    <div class="row" style="margin-top:14px; align-items:center">
+      <button id="edit-save">Save</button>
+      <button type="button" class="link" id="edit-cancel">Cancel</button>
+      <button type="button" class="link" id="edit-undo" hidden>Undo my edits</button>
+    </div>
+  </form>
 </dialog>
 
 <script src="themes.js"></script>
@@ -1012,6 +1033,7 @@
     const chips = el("div", "chips");
     if (p.visit) chips.append(el("span", "chip visited", `✓ Visited · ${p.visit.verdict}`));
     if (p.added) chips.append(el("span", "chip", "📱 Added in app"));
+    if (p.edited) chips.append(el("span", "chip", "✎ edited in app"));
     if (p.section === "recommend") chips.append(el("span", "chip star", "⭐ Been & loved"));
     if (p.fav) chips.append(el("span", "chip fav", "💚 Favorite"));
     if (p.inkind) chips.append(el("span", "chip fav", "💳 inKind"));
@@ -1019,9 +1041,13 @@
     for (const tag of p.tags) chips.append(el("span", "chip", tag));
     if (chips.children.length) c.append(chips);
 
+    const buttons = el("div", "row");
     const visit = el("button", "visit-btn above", p.visit ? "✎ Edit visit" : "✓ Mark visited");
     visit.addEventListener("click", () => openVisit(p));
-    c.append(visit);
+    const notes = el("button", "visit-btn above", "✎ Edit notes");
+    notes.addEventListener("click", () => openEdit(p));
+    buttons.append(visit, notes);
+    c.append(buttons);
     return c;
   }
 
@@ -1106,6 +1132,65 @@
       btn.disabled = false;
     }
   });
+
+  // ---------- Edit a place's notes ----------
+
+  let editing = null;
+
+  /** Shows how the deals text will be read, so a typo is spotted before saving. */
+  function previewDeals() {
+    const parsed = Deals.parseDeals($("edit-deals").value);
+    $("edit-reads").textContent = parsed.windows.length
+      ? "Reads as: " + parsed.windows.map(Deals.describeWindow).join("; ")
+      : parsed.vagueHH ? "Reads as: happy hour, but no days or times, so it can't be ranked." : "";
+  }
+
+  function openEdit(p) {
+    editing = p;
+    $("edit-title").textContent = p.name;
+    $("edit-desc").value = p.desc;
+    $("edit-deals").value = p.deals;
+    for (const f of ["desc", "deals"]) {
+      const was = p.edited && p.edited[f];
+      $(`edit-${f}-sheet`).hidden = !was;
+      $(`edit-${f}-sheet`).textContent = was ? `In the Sheet: ${was.sheet || "(blank)"}` : "";
+    }
+    $("edit-undo").hidden = !p.edited;
+    $("edit-error").hidden = true;
+    previewDeals();
+    $("edit").showModal();
+  }
+
+  async function saveEdit(desc, deals) {
+    const buttons = [$("edit-save"), $("edit-undo")];
+    buttons.forEach((b) => { b.disabled = true; });
+    $("edit-error").hidden = true;
+    try {
+      const data = await postScript(loadJSON(CONFIG_KEY), { action: "edit", place: editing.key, desc, deals });
+      Object.assign(editing, { desc: data.desc, deals: data.deals, edited: data.edited });
+      editing.dealWindows = Deals.parseDeals(editing.deals).windows;
+      editing.inkind = /\binkind\b/i.test(`${editing.deals} ${editing.desc}`);
+      $("edit").close();
+      render();
+    } catch (err) {
+      $("edit-error").textContent = err.message;
+      $("edit-error").hidden = false;
+    } finally {
+      buttons.forEach((b) => { b.disabled = false; });
+    }
+  }
+
+  $("edit-deals").addEventListener("input", previewDeals);
+  $("edit-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    saveEdit($("edit-desc").value, $("edit-deals").value);
+  });
+  // Undo: send the Sheet's own text back, which removes the edits.
+  $("edit-undo").addEventListener("click", () => {
+    const sheet = (f) => (editing.edited && editing.edited[f] ? editing.edited[f].sheet : editing[f]);
+    saveEdit(sheet("desc"), sheet("deals"));
+  });
+  $("edit-cancel").addEventListener("click", () => $("edit").close());
 
   // ---------- Mark visited ----------
 

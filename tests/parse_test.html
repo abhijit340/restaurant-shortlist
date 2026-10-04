@@ -66,8 +66,8 @@ const g = (name, lat, status = 'OPERATIONAL', periods = []) => ({
   const code = await (await fetch('../apps-script/Code.gs')).text();
   const { parseSheet, buildQuery_, toRecord_, namesMatch_, overallStatus_, needsLookup_, withAppData_, parseMatrix_, parseLatLng_,
     pickStale_, refreshFromDetails_, refreshFromSearch_, departureTime_, matrixRequest_, parseGeocode_,
-    rowsToData_, dataToRows_, applyVisit_, visitOf_, carryVisit_, DATA_HEADERS, parseAdded_, cleanLoc_, safeCell_, healthFrom_ } =
-    new Function(code + '\nreturn { parseSheet, buildQuery_, toRecord_, namesMatch_, overallStatus_, needsLookup_, withAppData_, parseMatrix_, parseLatLng_, pickStale_, refreshFromDetails_, refreshFromSearch_, departureTime_, matrixRequest_, parseGeocode_, rowsToData_, dataToRows_, applyVisit_, visitOf_, carryVisit_, DATA_HEADERS, parseAdded_, cleanLoc_, safeCell_, healthFrom_ };')();
+    rowsToData_, dataToRows_, applyVisit_, visitOf_, carryVisit_, DATA_HEADERS, parseAdded_, cleanLoc_, safeCell_, healthFrom_, applyEdit_ } =
+    new Function(code + '\nreturn { parseSheet, buildQuery_, toRecord_, namesMatch_, overallStatus_, needsLookup_, withAppData_, parseMatrix_, parseLatLng_, pickStale_, refreshFromDetails_, refreshFromSearch_, departureTime_, matrixRequest_, parseGeocode_, rowsToData_, dataToRows_, applyVisit_, visitOf_, carryVisit_, DATA_HEADERS, parseAdded_, cleanLoc_, safeCell_, healthFrom_, applyEdit_ };')();
   const places = parseSheet(SYNTHETIC);
   const find = (k) => places.find(p => p.key === k);
 
@@ -234,6 +234,23 @@ const g = (name, lat, status = 'OPERATIONAL', periods = []) => ({
     ['add: nonsense location rejected', cleanLoc_({ lat: 'x', lng: 1 }) === null && cleanLoc_({ lat: 95, lng: 1 }) === null && cleanLoc_(null) === null],
     ['add: non-https map link dropped', cleanLoc_({ lat: 1, lng: 1, maps: 'javascript:alert(1)' }).maps === ''],
     ['add: formula-looking text is stored as text', safeCell_('=IMPORTRANGE("x")') === "'=IMPORTRANGE(\"x\")" && safeCell_('+1 pasta') === "'+1 pasta" && safeCell_('HH 4-6') === 'HH 4-6'],
+  );
+
+  // ----- Editing notes in the app -----
+  const sheetPlace = { ...P('Echo Eatery', 'fremont'), desc: 'noodles', deals: 'HH 4-6' };
+  const e1 = applyEdit_({ key: 'echo eatery', locs: [loc1] }, sheetPlace, { desc: 'noodles', deals: ' HH daily 3-6 ' });
+  const shownEdited = withAppData_([{ ...sheetPlace }], new Map([['echo eatery', e1]]))[0];
+  const sheetChanged = withAppData_([{ ...sheetPlace, deals: 'HH m-f 5-7' }], new Map([['echo eatery', e1]]))[0];
+  const undone = applyEdit_(e1, sheetPlace, { desc: 'noodles', deals: 'HH 4-6' });
+  const roundTrip = rowsToData_(DATA_HEADERS, dataToRows_(new Map([['echo eatery', e1]]), [sheetPlace]).rows).get('echo eatery');
+  checks.push(
+    ['edit: only changed fields are stored, trimmed', JSON.stringify(e1.edits) === '{"deals":{"was":"HH 4-6","now":"HH daily 3-6"}}'],
+    ['edit: app shows the edited text, marked', shownEdited.deals === 'HH daily 3-6' && shownEdited.desc === 'noodles' && shownEdited.edited.deals.sheet === 'HH 4-6'],
+    ['edit: Sheet changed later -> Sheet wins', sheetChanged.deals === 'HH m-f 5-7' && sheetChanged.edited === null],
+    ['edit: setting it back removes the edit', JSON.stringify(undone.edits) === '{}'],
+    ['edit: clearing a field is an edit too', applyEdit_({}, sheetPlace, { deals: '' }).edits.deals.now === ''],
+    ['edit: stored in the tab and read back', roundTrip.edits.deals.now === 'HH daily 3-6'],
+    ['edit: survives a fresh Google lookup', carryVisit_({ status: 'ok', locs: [] }, e1).edits.deals.now === 'HH daily 3-6'],
   );
 
   // ----- Health notes -----
