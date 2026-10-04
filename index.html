@@ -232,7 +232,7 @@
   <button id="more" hidden>Show more</button>
 
   <footer>
-    v0.28 · <a href="help.html">Help</a> · <a href="colors.html">Colors</a><span id="reconnect" hidden> · <button class="link" id="share">Share setup link</button> · <button class="link" id="reconnect-btn">Change Sheet connection</button></span>
+    v0.29 · <a href="help.html">Help</a> · <a href="colors.html">Colors</a><span id="reconnect" hidden> · <button class="link" id="share">Share setup link</button> · <button class="link" id="reconnect-btn">Change Sheet connection</button></span>
   </footer>
 </main>
 
@@ -678,12 +678,12 @@
     if (f.open) list = list.filter((x) => !x.closedOnArrival);
     if (f.max) list = list.filter((x) => x.trip && x.trip.fastest <= f.max);
 
-    // 5. Places with travel times first (shortest transit first), then the rest by distance.
-    //    Within each: deals on (or starting soon) when you'd arrive, and inKind places,
-    //    jump to the top; places closed when you'd arrive go last.
+    // 5. Places closed when you'd arrive (shown greyed out) go to the very bottom.
+    //    Above them: places with travel times first (shortest transit first), then the
+    //    rest by distance; within each, deals on (or starting soon) and inKind jump up.
     list.sort((a, b) =>
-      (a.trip ? 0 : 1) - (b.trip ? 0 : 1) ||
       a.closedOnArrival - b.closedOnArrival ||
+      (a.trip ? 0 : 1) - (b.trip ? 0 : 1) ||
       (a.boost ? 0 : 1) - (b.boost ? 0 : 1) ||
       (a.trip && b.trip ? a.trip.min - b.trip.min : 0));
     state.lastCount = list.length;
