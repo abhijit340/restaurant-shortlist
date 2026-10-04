@@ -157,9 +157,12 @@
     <form class="card" id="plan-form" hidden>
       <label for="plan-place">Starting from</label>
       <input id="plan-place" placeholder="Capitol Hill, an address… (blank = where I am)" autocomplete="off">
-      <label for="plan-when">Being there at</label>
-      <input id="plan-when" type="datetime-local">
-      <p class="hint">Leave blank for right now.</p>
+      <label for="plan-time">Being there at</label>
+      <div class="row">
+        <select id="plan-day" aria-label="Day"></select>
+        <input id="plan-time" type="time" aria-label="Time" style="width:auto; flex:1">
+      </div>
+      <p class="hint">Leave the time blank for right now.</p>
       <p class="error" id="plan-error" hidden></p>
       <div class="row" style="margin-top:12px; align-items:center">
         <button>Show places</button>
@@ -229,7 +232,7 @@
   <button id="more" hidden>Show more</button>
 
   <footer>
-    v0.27 · <a href="help.html">Help</a> · <a href="colors.html">Colors</a><span id="reconnect" hidden> · <button class="link" id="share">Share setup link</button> · <button class="link" id="reconnect-btn">Change Sheet connection</button></span>
+    v0.28 · <a href="help.html">Help</a> · <a href="colors.html">Colors</a><span id="reconnect" hidden> · <button class="link" id="share">Share setup link</button> · <button class="link" id="reconnect-btn">Change Sheet connection</button></span>
   </footer>
 </main>
 
@@ -1393,10 +1396,27 @@
     btn.classList.toggle("planned", Boolean(place || when));
   }
 
-  // "2026-10-03T19:00" in the phone's own time zone, as the date-time picker wants it.
-  function toLocalInput(d) {
-    const pad = (n) => String(n).padStart(2, "0");
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  // Dates and times in the phone's own time zone, as the form's boxes use them.
+  const pad2 = (n) => String(n).padStart(2, "0");
+  const dayValue = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; // "2026-10-03"
+  const timeValue = (d) => `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;                     // "19:00"
+
+  /** Today, Tomorrow, then the next five days by name ("Fri Oct 9"). */
+  function fillDays(selected) {
+    const days = [];
+    const start = realNow();
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(start.getFullYear(), start.getMonth(), start.getDate() + i);
+      const label = i === 0 ? "Today" : i === 1 ? "Tomorrow"
+        : d.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
+      days.push(new Option(label, dayValue(d)));
+    }
+    // A plan further out than a week keeps its own day in the list.
+    if (selected && !days.some((o) => o.value === selected)) {
+      days.push(new Option(new Date(`${selected}T12:00`).toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" }), selected));
+    }
+    $("plan-day").replaceChildren(...days);
+    $("plan-day").value = selected || days[0].value;
   }
 
   function showPlanForm(open) {
@@ -1409,8 +1429,9 @@
     $("plan-place").placeholder = place && place.pinned
       ? "Dropped pin (type a place to change it)"
       : "Capitol Hill, an address… (blank = where I am)";
-    $("plan-when").value = state.plan.when ? toLocalInput(new Date(state.plan.when)) : "";
-    $("plan-when").min = toLocalInput(realNow());
+    const when = state.plan.when ? new Date(state.plan.when) : null;
+    fillDays(when ? dayValue(when) : "");
+    $("plan-time").value = when ? timeValue(when) : "";
   }
 
   /** Re-sorts for the current plan (or here and now) without reloading the Sheet. */
@@ -1434,8 +1455,13 @@
   $("plan-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const query = $("plan-place").value.trim();
-    let when = $("plan-when").value ? new Date($("plan-when").value).getTime() : null;
-    if (when && when <= realNow().getTime()) when = null; // a past time just means "now"
+    const time = $("plan-time").value;
+    const when = time ? new Date(`${$("plan-day").value}T${time}`).getTime() : null;
+    if (when && when <= realNow().getTime()) {
+      $("plan-error").textContent = "That time has already passed. Pick a later time, or clear the time for right now.";
+      $("plan-error").hidden = false;
+      return;
+    }
     const btn = e.submitter || e.target.querySelector("button");
     btn.disabled = true;
     $("plan-error").hidden = true;
