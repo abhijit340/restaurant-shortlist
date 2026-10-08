@@ -152,4 +152,6 @@ PENDING = {"unplaced bakery"}  # places "not looked up yet", until the app asks 
 
 if __name__ == "__main__":
     print(f"Serving on http://localhost:{PORT}/  (fake script at /mock-exec, key 'test')")
-    ThreadingHTTPServer(("", PORT), Handler).serve_forever()
+    # This computer only: the folder holds private files (the real list's test copies,
+    # the planning docs) that other devices on the same Wi-Fi shouldn't be able to fetch.
+    ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()

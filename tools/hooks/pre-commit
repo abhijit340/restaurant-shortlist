@@ -1,0 +1,14 @@
+#!/bin/sh
+# Runs before every commit, so a broken or unsafe change can't be published by accident:
+#   1. the checks in tests/parse_test.html
+#   2. the publish guard (the script may never change the restaurant tab)
+#   3. the privacy scan (nothing from the real list in a public file)
+#
+# Turned on once per computer with:  git config core.hooksPath tools/hooks
+# To commit without it in an emergency:  git commit --no-verify
+set -e
+cd "$(git rev-parse --show-toplevel)"
+PATH="/c/Program Files/nodejs:$PATH"
+node tests/run_tests.js
+python tools/check_sheet_writes.py
+python tools/check_no_private_data.py
