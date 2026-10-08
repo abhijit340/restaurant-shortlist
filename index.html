@@ -232,7 +232,7 @@
   <button id="more" hidden>Show more</button>
 
   <footer>
-    v0.30 · <a href="help.html">Help</a> · <a href="colors.html">Colors</a><span id="reconnect" hidden> · <button class="link" id="share">Share setup link</button> · <button class="link" id="reconnect-btn">Change Sheet connection</button></span>
+    v0.31 · <a href="help.html">Help</a> · <a href="colors.html">Colors</a><span id="reconnect" hidden> · <button class="link" id="share">Share setup link</button> · <button class="link" id="reconnect-btn">Change Sheet connection</button></span>
   </footer>
 </main>
 
@@ -326,6 +326,8 @@
   const REUSE_MS = 10 * 60 * 1000;   // …within this long
   const SHORT_STAY = 60;             // flag if you'd have less than this many minutes before closing
   const SHOW_WALK_UNDER = 25;        // list the walk next to transit when it's shorter than this
+  const BOOST_WITHIN = 20;           // a deal or inKind only moves a place up if it's within this many minutes
+  const EST_MIN_PER_MILE = 24;       // rough walking minutes per straight-line mile, for places without a travel time
 
   // For testing on a computer: ?at=47.61,-122.33 fakes your location, ?now=2026-10-02T21:30 fakes the clock.
   const params = new URLSearchParams(location.search);
@@ -685,8 +687,14 @@
       x.deal = !x.closedOnArrival && x.p.dealWindows.length
         ? Deals.dealAt(x.p.dealWindows, x.arrive, x.hours && x.hours.open ? x.hours.closesIn : null)
         : null;
-      // inKind places rank like a happy hour whenever they're open when you'd arrive.
-      x.boost = Boolean(x.deal) || (x.p.inkind && !x.closedOnArrival);
+      // inKind places count like a happy hour whenever they're open when you'd arrive.
+      x.dealOn = Boolean(x.deal) || (x.p.inkind && !x.closedOnArrival);
+      // A deal only moves a place up the list when it's close: within BOOST_WITHIN
+      // minutes by its travel time, or by a walking estimate from the distance when it
+      // has none. Farther away, it keeps its deal line and gold pin but ranks by travel
+      // time like anywhere else. (With no location at all, deals still come first.)
+      const minutesAway = x.trip ? x.trip.min : x.near ? x.near.d * EST_MIN_PER_MILE : 0;
+      x.boost = x.dealOn && minutesAway <= BOOST_WITHIN;
     }
 
     // 4. Time-based filters.
@@ -696,7 +704,7 @@
 
     // 5. Places closed when you'd arrive (shown greyed out) go to the very bottom.
     //    Above them: places with travel times first (shortest transit first), then the
-    //    rest by distance; within each, deals on (or starting soon) and inKind jump up.
+    //    rest by distance; within each, nearby deals on (or starting soon) and inKind jump up.
     list.sort((a, b) =>
       a.closedOnArrival - b.closedOnArrival ||
       (a.trip ? 0 : 1) - (b.trip ? 0 : 1) ||
@@ -822,7 +830,7 @@
 
     const pins = list.filter((x) => x.near).map((x) => ({
       x, lat: x.near.loc.lat, lng: x.near.loc.lng,
-      color: x.closedOnArrival ? PIN.closed : x.boost ? PIN.boost : PIN.open,
+      color: x.closedOnArrival ? PIN.closed : x.dealOn ? PIN.boost : PIN.open,
       selected: x.p.key === state.selectedKey,
     }));
     const tapPin = (pin) => {
