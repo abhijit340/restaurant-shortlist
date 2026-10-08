@@ -232,7 +232,7 @@
   <button id="more" hidden>Show more</button>
 
   <footer>
-    v0.29 · <a href="help.html">Help</a> · <a href="colors.html">Colors</a><span id="reconnect" hidden> · <button class="link" id="share">Share setup link</button> · <button class="link" id="reconnect-btn">Change Sheet connection</button></span>
+    v0.30 · <a href="help.html">Help</a> · <a href="colors.html">Colors</a><span id="reconnect" hidden> · <button class="link" id="share">Share setup link</button> · <button class="link" id="reconnect-btn">Change Sheet connection</button></span>
   </footer>
 </main>
 
@@ -362,9 +362,16 @@
 
   // ---------- Talking to the Sheet's script ----------
 
+  // Give up on a request after this long. On a weak signal a request can otherwise
+  // hang for minutes, leaving "updating…" on screen and the Refresh button disabled.
+  const READ_TIMEOUT = 30 * 1000;
+  const SAVE_TIMEOUT = 60 * 1000; // saving may wait for a running Sheet update to finish
+  const giveUpAfter = (ms) => (AbortSignal.timeout ? AbortSignal.timeout(ms) : undefined);
+
   /** Reads from the script (the list, travel times, place lookups). */
   function callScript(cfg, extra = "") {
-    return scriptAnswer(fetch(`${cfg.url}?key=${encodeURIComponent(cfg.key)}${extra}`, { cache: "no-store" }));
+    return scriptAnswer(fetch(`${cfg.url}?key=${encodeURIComponent(cfg.key)}${extra}`,
+      { cache: "no-store", signal: giveUpAfter(READ_TIMEOUT) }));
   }
 
   /** Saves a change to the Sheet. Sent as plain text so the browser doesn't need a pre-check request. */
@@ -373,6 +380,7 @@
       method: "POST",
       headers: { "Content-Type": "text/plain;charset=utf-8" },
       body: JSON.stringify({ key: cfg.key, ...body }),
+      signal: giveUpAfter(SAVE_TIMEOUT),
     }));
   }
 
@@ -418,14 +426,18 @@
       const [lat, lng] = at.split(",").map(Number);
       return Promise.resolve({ lat, lng, acc: 0 });
     }
-    return new Promise((resolve, reject) => {
-      if (!("geolocation" in navigator)) return reject(new Error("This browser doesn't support location."));
+    if (!("geolocation" in navigator)) return Promise.reject(new Error("This browser doesn't support location."));
+    const ask = (options) => new Promise((resolve, reject) => {
       navigator.geolocation.getCurrentPosition(
         (pos) => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude, acc: pos.coords.accuracy }),
-        (err) => reject(new Error(LOCATION_ERRORS[err.code] || err.message)),
-        { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 }
-      );
+        reject, options);
     });
+    // GPS first. Indoors it often can't get a fix, so then settle for the phone's
+    // rough location (Wi-Fi and cell towers), which is plenty for ranking places.
+    return ask({ enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 })
+      .catch((err) => (err.code === 1 ? Promise.reject(err) // blocked: asking again won't help
+        : ask({ enableHighAccuracy: false, timeout: 8000, maximumAge: 5 * 60000 })))
+      .catch((err) => { throw new Error(LOCATION_ERRORS[err.code] || err.message); });
   }
 
   /** Puts a list (fresh from the Sheet, or the saved copy) on screen. */
@@ -653,7 +665,11 @@
 
     // 2. The nearest few get real travel times (fetched in the background if missing).
     //    timesFor() first drops saved times if you've moved or they're old.
-    const toTime = rows.filter((x) => x.near).slice(0, TIMED);
+    //    Places that look closed are passed over, so late at night the lookups go to
+    //    the nearest places you could actually eat at; any slots left go to closed ones.
+    const located = rows.filter((x) => x.near);
+    const toTime = located.filter((x) => couldBeOpen(x, t0)).slice(0, TIMED);
+    if (toTime.length < TIMED) toTime.push(...located.filter((x) => !couldBeOpen(x, t0)).slice(0, TIMED - toTime.length));
     if (here) { timesFor(here); requestTimes(toTime); }
     const timed = new Set(toTime.map((x) => x.p.key));
     state.timedCount = toTime.length;
@@ -707,6 +723,18 @@
     $("more").hidden = mapMode || list.length <= state.shown;
     $("mapwrap").hidden = !mapMode;
     if (mapMode) showMap(list);
+  }
+
+  /**
+   * A quick guess, before travel times are known, at whether a place is worth a
+   * travel-time lookup: open at `when` (or hours unknown), or opening within OPENS_SOON
+   * minutes, since you may well arrive after it opens.
+   */
+  const OPENS_SOON = 45;
+  function couldBeOpen(x, when) {
+    if (x.p.closed === "closed temporarily") return false;
+    const info = openInfo(x.near.loc.hours, when);
+    return !info || info.open || info.opensIn <= OPENS_SOON;
   }
 
   // ---------- Map view (loaded only when first opened) ----------
@@ -1299,7 +1327,8 @@
 
   function link(href, text, className = "") {
     const a = el("a", className, text);
-    a.href = href; a.target = "_blank"; a.rel = "noopener";
+    // Only ordinary web addresses become links; anything else in the Sheet stays plain text.
+    if (/^https?:\/\//i.test(href)) { a.href = href; a.target = "_blank"; a.rel = "noopener"; }
     return a;
   }
 
