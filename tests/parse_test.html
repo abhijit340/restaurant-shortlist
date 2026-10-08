@@ -253,6 +253,27 @@ const g = (name, lat, status = 'OPERATIONAL', periods = []) => ({
     ['edit: survives a fresh Google lookup', carryVisit_({ status: 'ok', locs: [] }, e1).edits.deals.now === 'HH daily 3-6'],
   );
 
+  // ----- Keeping what was typed in the app safe in the "app data" tab -----
+  const col = (name) => DATA_HEADERS.indexOf(name);
+  const gone = { ...visited, key: 'old name', name: 'Old Name' };
+  const plain = { key: 'no notes', name: 'No Notes', status: 'ok', query: 'No Notes', at: '2026-09-30', locs: [loc1] };
+  const keptRows = dataToRows_(new Map([['old name', gone], ['no notes', plain]]), []).rows;
+  const risky = applyVisit_({ key: 'echo eatery', status: 'ok', query: '+39 Pizzeria', at: '2026-09-30', locs: [] },
+    { verdict: 'Good', deals: '=HYPERLINK("x")', notes: '-2 for slow service' }, '2026-10-02');
+  const riskyRow = dataToRows_(new Map([['echo eatery', risky]]), [P('Echo Eatery')]).rows[0];
+  const riskyBack = rowsToData_(DATA_HEADERS, [riskyRow]).get('echo eatery');
+  // What an older tab hands back after Sheets "helpfully" converted the cells.
+  const converted = { key: 1984, Verdict: 'Good', Visited: new Date('2026-10-02T12:00:00Z'), 'Deals seen': new Date(2026, 4, 6), 'Visit notes': 7, 'data (JSON)': '[]' };
+  const fromSheets = rowsToData_(DATA_HEADERS, [DATA_HEADERS.map(h => (h in converted ? converted[h] : ''))]).get('1984');
+  checks.push(
+    ['safety: a visit survives its place leaving the list', keptRows.length === 1 && keptRows[0][col('Verdict')] === 'Loved' && keptRows[0][col('Sheet row')] === 'not in the list'],
+    ['safety: …and is picked up again if the place returns', rowsToData_(DATA_HEADERS, keptRows).get('old name').verdict === 'Loved'],
+    ['safety: a listed place is written once, in list order', dataToRows_(new Map([['echo eatery', visited]]), [P('Echo Eatery'), P('Echo Eatery')]).rows.length === 1],
+    ['safety: formula-looking notes are stored as text', riskyRow[col('Deals seen')] === "'=HYPERLINK(\"x\")" && riskyRow[col('Visit notes')] === "'-2 for slow service" && riskyRow[col('Searched for')] === "'+39 Pizzeria"],
+    ['safety: …and read back exactly as typed', riskyBack.dealsSeen === '=HYPERLINK("x")' && riskyBack.visitNotes === '-2 for slow service' && riskyBack.query === '+39 Pizzeria'],
+    ['safety: cells Sheets converted come back as text', Boolean(fromSheets) && fromSheets.dealsSeen === '5-6' && fromSheets.visitNotes === '7' && fromSheets.visited === '2026-09-30'],
+  );
+
   // ----- Health notes -----
   const today = new Date('2026-10-02T12:00:00Z');
   const ago = (days) => today.getTime() - days * 86400000;
@@ -303,6 +324,15 @@ const g = (name, lat, status = 'OPERATIONAL', periods = []) => ({
     ['Saturday-night window still on after midnight', at('hh sat 10-2', '2026-10-04T00:30').status === 'now'],
     ['special counts all day on its day', at('$1 tacos fridays', '2026-10-02T12:00').kind === 'special'],
     ['happy hour beats special', at('$1 tacos fridays; hh 4-6', '2026-10-02T17:00').kind === 'hh'],
+    ['"-close" from last night is not on this afternoon', at('daily 5-6, 9-close', '2026-10-02T15:00', 420) === null],
+    ['"after 9pm" is not on at noon', at('$3 slices after 9pm', '2026-10-02T12:00', 600) === null],
+    ['"-close" is still on after midnight the same night', at('hh fri 10-close', '2026-10-03T00:30', 60).endsIn === 60],
+    ['"-close" starting soon', at('daily 9-close', '2026-10-02T20:40', 200).status === 'soon'],
+    ['deals: "p.m." is not Monday', D('HH 4-6 p.m.') === 'Daily 4 PM–6 PM'],
+    ['deals: "w/" is not Wednesday', D('$2 off w/ food') === ''],
+    ['deals: the word "we" is not Wednesday', D('we liked the fries 4-6') === 'Daily 4 PM–6 PM' && D('hh we-fr 4-6') === 'Wed–Fri 4 PM–6 PM'],
+    ['deals: "mmm" is not Monday', D('mmm good') === ''],
+    ['deals: "4p-6p", "4 to 6", long dash', D('hh 4p-6p') === 'Daily 4 PM–6 PM' && D('hh 4 to 6') === 'Daily 4 PM–6 PM' && D('hh 3—6') === 'Daily 3 PM–6 PM'],
   );
 
   const ul = document.getElementById('checks');

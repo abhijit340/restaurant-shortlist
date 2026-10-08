@@ -48,7 +48,8 @@
       out.push(map[c]);
       rest = rest.slice(c.length);
     }
-    return out.length >= 2 ? out : null;
+    // A day can't repeat, so "mmm" isn't Monday three times.
+    return out.length >= 2 && new Set(out).size === out.length ? out : null;
   }
 
   /** All the days mentioned in a clause, or null. */
@@ -62,7 +63,8 @@
     // Ranges first ("m-f", "sun-thurs"), then remove them so their ends aren't re-read.
     s = s.replace(new RegExp(`\\b(${DAY_WORD})\\s*[-–]\\s*(${DAY_WORD})\\b`, "g"), (_, a, b) => { add(dayRange(a, b)); return " "; });
     for (const word of s.split(/[^a-z]+/)) {
-      if (word in DAY) add([DAY[word]]);
+      // "we" on its own is the word, not Wednesday ("we-fr" is still read as a range above).
+      if (word in DAY && word !== "we") add([DAY[word]]);
       else if (/^[mtwfsuha]{3,6}$/.test(word)) { const c = compactDays(word); if (c) add(c); }
     }
     return found ? [...days].sort() : null;
@@ -81,7 +83,7 @@
   function findTimes(s) {
     const out = [];
     const T = "(\\d{1,2})(?::(\\d{2}))?\\s*(am|pm)?";
-    const re = new RegExp(`(?:^|[^$\\d.:/])${T}\\s*[-–]\\s*(?:${T}|(close))`, "g");
+    const re = new RegExp(`(?:^|[^$\\d.:/])${T}\\s*(?:[-–—]|to\\b)\\s*(?:${T}|(close))`, "g");
     let m;
     while ((m = re.exec(s))) {
       const endAmPm = m[6];
@@ -110,7 +112,10 @@
 
   function parseDeals(raw) {
     const text = undoDate(String(raw || "").trim());
-    const s = text.toLowerCase();
+    const s = text.toLowerCase()
+      .replace(/\b([ap])\.m\.?/g, "$1m")     // "p.m." → "pm" (its "m" isn't Monday)
+      .replace(/(\d)\s*([ap])\b/g, "$1$2m")  // "4p-6p" → "4pm-6pm"
+      .replace(/\bw\//g, "with ");           // "w/ food" isn't Wednesday
     const clauses = s.split(/[;,]|\band\b/).map((c) => c.trim()).filter(Boolean);
     const windows = [];
     let prevDays = null;
@@ -179,6 +184,7 @@
   const WEEK = 7 * 1440;
   const SOON = 30;     // a deal starting within this many minutes of arrival counts
   const MIN_LEFT = 10; // a running deal needs at least this many minutes left
+  const LAST_CALL = 6 * 60; // a "…-close" deal is over by 6 AM the next morning at the latest
 
   /**
    * The deal that matters for arriving at `when`: one running then (with 10+ min
@@ -194,10 +200,14 @@
     for (const w of windows) {
       for (const d of w.days) {
         for (const shift of [0, -WEEK, WEEK]) { // windows near the Sat→Sun edge
-          const start = d * 1440 + (w.start === null ? 0 : w.start) + shift;
+          const day = d * 1440 + shift; // midnight at the start of that day
+          const start = day + (w.start === null ? 0 : w.start);
+          // "…-close" ends when the place closes that night, and never later than
+          // 6 AM the next morning. Without that limit, last night's "9-close"
+          // would count as running at any hour the place is open today.
           const end = w.end === "close"
-            ? (closesIn != null ? t + closesIn : d * 1440 + 1440 + shift)
-            : d * 1440 + w.end + shift;
+            ? Math.min(closesIn != null ? t + closesIn : day + 1440, day + 1440 + LAST_CALL)
+            : day + w.end;
           let c = null;
           if (start <= t && t <= end - MIN_LEFT) c = { kind: w.kind, status: "now", startsIn: 0, endsIn: end - t };
           else if (start > t && start - t <= SOON && end > start) c = { kind: w.kind, status: "soon", startsIn: start - t, endsIn: end - t };

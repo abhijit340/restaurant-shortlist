@@ -819,7 +819,7 @@ function addPlace_(body) {
 
 /** Text starting with = + - @ would be run as a formula by Sheets; a leading apostrophe keeps it as text. */
 function safeCell_(v) {
-  return /^[=+\-@]/.test(v) ? "'" + v : v;
+  return typeof v === 'string' && /^[=+\-@]/.test(v) ? "'" + v : v;
 }
 
 /** The Google match sent back by the phone, reduced to the known fields with sane types (or null). */
@@ -1004,20 +1004,26 @@ function rowsToData_(header, rows) {
     at: Math.max(col('Last updated'), col('Looked up')), // older tabs called it "Looked up"
   };
   const get = (r, i) => (i < 0 || r[i] == null ? '' : r[i]);
+  // What someone typed in the app, as text. Older tabs let Sheets turn "5-6" into
+  // a date (May 6); turn that back. A leading apostrophe left by safeCell_ is dropped.
+  const typedText = (v) => (v instanceof Date ? (v.getMonth() + 1) + '-' + v.getDate() : String(v)).replace(/^'(?=[=+\-@])/, '');
+  // Older tabs let Sheets turn "2026-10-02" into a date too. Everything is written
+  // back as text, so read those as the text they were.
+  const dateText = (v) => (v instanceof Date ? Utilities.formatDate(v, 'America/Los_Angeles', 'yyyy-MM-dd') : v);
   const map = new Map();
   for (const r of rows) {
-    const key = get(r, c.key);
+    const key = String(get(r, c.key)); // a name like "1984" must not come back as a number
     if (!key) continue;
     let locs = [];
     try { locs = JSON.parse(get(r, c.json) || '[]'); } catch (e) { /* hand-edited cell; look it up again */ }
     // Accept hand-typed statuses in any case ("OK", " Skip").
     const typed = String(get(r, c.status)).trim().toLowerCase();
     map.set(key, {
-      key, name: get(r, c.name), row: get(r, c.row),
+      key, name: typedText(get(r, c.name)), row: get(r, c.row),
       status: MANUAL_STATUSES.includes(typed) ? typed : get(r, c.status),
-      query: get(r, c.query), at: get(r, c.at), locs,
-      visited: get(r, c.visited), verdict: get(r, c.verdict),
-      dealsSeen: get(r, c.dealsSeen), visitNotes: get(r, c.visitNotes),
+      query: typedText(get(r, c.query)), at: dateText(get(r, c.at)), locs,
+      visited: dateText(get(r, c.visited)), verdict: get(r, c.verdict),
+      dealsSeen: typedText(get(r, c.dealsSeen)), visitNotes: typedText(get(r, c.visitNotes)),
       edits: parseEdits_(get(r, c.edits)),
     });
   }
@@ -1028,36 +1034,69 @@ function parseEdits_(text) {
   try { const e = JSON.parse(text || '{}'); return e && typeof e === 'object' ? e : {}; } catch (err) { return {}; }
 }
 
-/** Records → tab rows in sheet order, plus each row's status color. Pure, testable. */
+const NOT_LISTED = 'not in the list';
+
+/** True if a record holds something a person entered in the app (a visit or an edit). */
+function hasYourNotes_(r) {
+  return Boolean(r.verdict || r.visited || r.dealsSeen || r.visitNotes || (r.edits && Object.keys(r.edits).length));
+}
+
+/**
+ * Records → tab rows in sheet order, plus each row's status color. Pure, testable.
+ * A place that is no longer in the list (renamed, removed, moved to AVOID, or
+ * hidden because a section heading was mistyped) loses its Google data, which can
+ * be looked up again, but a visit or edit made in the app can't be: those rows are
+ * kept at the bottom, and are picked up again if the place comes back.
+ */
 function dataToRows_(data, places) {
   const rows = [];
   const colors = [];
+  const add = (r, name, row) => {
+    const first = r.locs[0] || {};
+    rows.push([r.key, name, row, r.status, r.visited || '', r.verdict || '', r.dealsSeen || '',
+      r.visitNotes || '', r.edits && Object.keys(r.edits).length ? JSON.stringify(r.edits) : '', first.name || '', first.addr || '', r.locs.length, first.cuisine || '',
+      overallStatus_(r.locs), r.query, r.at, JSON.stringify(r.locs)].map(safeCell_));
+    colors.push(STATUS_COLORS[r.status] || null);
+  };
+  const listed = new Set();
   for (const p of places) {
     const r = data.get(p.key);
-    if (!r) continue;
-    const first = r.locs[0] || {};
-    rows.push([r.key, p.name, p.row, r.status, r.visited || '', r.verdict || '', r.dealsSeen || '',
-      r.visitNotes || '', r.edits && Object.keys(r.edits).length ? JSON.stringify(r.edits) : '', first.name || '', first.addr || '', r.locs.length, first.cuisine || '',
-      overallStatus_(r.locs), r.query, r.at, JSON.stringify(r.locs)]);
-    colors.push(STATUS_COLORS[r.status] || null);
+    if (!r || listed.has(p.key)) continue;
+    listed.add(p.key);
+    add(r, p.name, p.row);
   }
+  data.forEach(r => { if (!listed.has(r.key) && hasYourNotes_(r)) add(r, r.name, NOT_LISTED); });
   return { rows, colors };
 }
 
-/** Rewrites the tab in sheet order. Places no longer in the list (or moved to AVOID) drop off. */
+/**
+ * Rewrites the tab in sheet order. The new rows are written over the old ones and
+ * only then is anything left over cleared, so the tab is never empty part-way
+ * through (a phone loading the list at that moment would see no locations, and a
+ * failed run would lose every visit).
+ */
 function writeAppData_(data, places) {
   const ss = SpreadsheetApp.getActive();
   const sheet = ss.getSheetByName(DATA_TAB) || ss.insertSheet(DATA_TAB);
   const { rows, colors } = dataToRows_(data, places);
+  const width = DATA_HEADERS.length;
+  const all = [DATA_HEADERS].concat(rows);
   const statusCol = DATA_HEADERS.indexOf('Status') + 1;
-  sheet.clearContents();
-  sheet.getRange(1, 1, 1, DATA_HEADERS.length).setValues([DATA_HEADERS]).setFontWeight('bold');
+  const hadRows = sheet.getLastRow();
+  const hadCols = sheet.getLastColumn();
+  if (sheet.getMaxRows() < all.length) sheet.insertRowsAfter(sheet.getMaxRows(), all.length - sheet.getMaxRows());
+  if (sheet.getMaxColumns() < width) sheet.insertColumnsAfter(sheet.getMaxColumns(), width - sheet.getMaxColumns());
+
+  // Plain-text cells keep what was typed: "5-6" stays "5-6" (not May 6), "1984" stays text.
+  sheet.getRange(1, 1, all.length, width).setNumberFormat('@').setValues(all);
+  sheet.getRange(1, 1, 1, width).setFontWeight('bold');
   sheet.setFrozenRows(1);
-  if (!rows.length) return;
-  sheet.getRange(2, 1, rows.length, DATA_HEADERS.length).setValues(rows);
+  if (hadRows > all.length) sheet.getRange(all.length + 1, 1, hadRows - all.length, Math.max(hadCols, width)).clearContent();
+  if (hadCols > width) sheet.getRange(1, width + 1, all.length, hadCols - width).clearContent(); // an older, wider layout
+
   // The status colors may sit in a different column than before, so clear the whole body first.
-  sheet.getRange(2, 1, sheet.getMaxRows() - 1, sheet.getMaxColumns()).setBackground(null);
-  sheet.getRange(2, statusCol, rows.length, 1).setBackgrounds(colors.map(c => [c]));
+  if (sheet.getMaxRows() > 1) sheet.getRange(2, 1, sheet.getMaxRows() - 1, sheet.getMaxColumns()).setBackground(null);
+  if (rows.length) sheet.getRange(2, statusCol, rows.length, 1).setBackgrounds(colors.map(c => [c]));
 }
 
 function json_(obj) {
