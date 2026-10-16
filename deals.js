@@ -52,8 +52,21 @@
     return out.length >= 2 && new Set(out).size === out.length ? out : null;
   }
 
-  /** All the days mentioned in a clause, or null. */
+  // "except mon", "no hh on sundays", "closed tue-wed", "but not mon", "not valid on fri":
+  // the days after it (up to the first time, a "." or "/" break, or a fresh "hh") are left out.
+  // A bare "but" is handled in findDays.
+  const EXCEPT = new RegExp(`\\b(?:except|excluding|no|not|closed)\\b(?:\\s+(?:on|hh|happy hours?|deals?|specials?|available|valid|offered|served|during))*\\s+(?=(?:${DAY_WORD}|weekdays?|weekends?)\\b)(?:(?!\\d|[./]|\\s[-–]\\s|\\b(?:all day|after|until|hh|happy hours?)\\b).)*`);
+
+  // A clause that is nothing but days ("sat", "sat & sun", "on wed").
+  const DAYS_ONLY = new RegExp(`^(?:[\\s&/–-]|\\b(?:on|thru|through|to|weekends?|weekdays?|${DAY_WORD})\\b)*$`);
+
+  /** All the days mentioned in a clause, or null. Only exclusions ("except mon") = daily minus those. */
   function findDays(s) {
+    let excluded = null;
+    // "every day but mon 4-6" = except; in "4-6 daily, but fri 3-6" Friday's own time is a clause of its own.
+    const but = /\bbut\b/.exec(s), pre = but && s.slice(0, but.index);
+    if (but && !findTimes(pre).length && findDays(pre)) s = `${pre}except${s.slice(but.index + 3)}`;
+    s = s.replace(EXCEPT, (rest) => { excluded = findDays(rest.replace(/\b(?:except|excluding|no|not|closed)\b/g, " ")); return " "; });
     const days = new Set();
     let found = false;
     const add = (list) => { list.forEach((d) => days.add(d)); found = true; };
@@ -61,13 +74,16 @@
     if (/\bweekdays?\b/.test(s)) add([1, 2, 3, 4, 5]);
     if (/\bweekends?\b/.test(s)) add([0, 6]);
     // Ranges first ("m-f", "sun-thurs"), then remove them so their ends aren't re-read.
-    s = s.replace(new RegExp(`\\b(${DAY_WORD})\\s*[-–]\\s*(${DAY_WORD})\\b`, "g"), (_, a, b) => { add(dayRange(a, b)); return " "; });
+    s = s.replace(new RegExp(`\\b(${DAY_WORD})\\s*(?:[-–]|\\b(?:thru|through|to)\\b)\\s*(${DAY_WORD})\\b`, "g"), (_, a, b) => { add(dayRange(a, b)); return " "; });
     for (const word of s.split(/[^a-z]+/)) {
       // "we" on its own is the word, not Wednesday ("we-fr" is still read as a range above).
       if (word in DAY && word !== "we") add([DAY[word]]);
       else if (/^[mtwfsuha]{3,6}$/.test(word)) { const c = compactDays(word); if (c) add(c); }
     }
-    return found ? [...days].sort() : null;
+    if (!excluded) return found ? [...days].sort() : null;
+    const out = (found ? [...days].sort() : ALL).filter((d) => !excluded.includes(d));
+    if (!found) out.onlyExcept = excluded; // e.g. a lone "except sundays" clause
+    return out;
   }
 
   // Hour (+ optional minutes, am/pm) → minutes after midnight, afternoon-biased.
@@ -91,6 +107,7 @@
       const start = toMinutes(m[1], m[2], startAmPm);
       let end = m[7] ? "close" : toMinutes(m[4], m[5], endAmPm);
       if (end !== "close" && end <= start) end += 12 * 60; // "11-12" → 11 PM–midnight
+      if (end !== "close" && end <= start) end += 12 * 60; // "10pm-2am" → past midnight
       out.push({ start, end });
     }
     const after = /\bafter (\d{1,2})(?::(\d{2}))?\s*(am|pm)?/.exec(s);
@@ -115,11 +132,34 @@
     const s = text.toLowerCase()
       .replace(/\b([ap])\.m\.?/g, "$1m")     // "p.m." → "pm" (its "m" isn't Monday)
       .replace(/(\d)\s*([ap])\b/g, "$1$2m")  // "4p-6p" → "4pm-6pm"
-      .replace(/\bw\//g, "with ");           // "w/ food" isn't Wednesday
-    const clauses = s.split(/[;,]|\band\b/).map((c) => c.trim()).filter(Boolean);
+      .replace(/\bw\//g, "with ")            // "w/ food" isn't Wednesday
+      // "mon and tue 4-6" / "except mon and tue" is one day list, not two clauses; but
+      // "3-6 m-f and sat 12-3" / "3-6 except sat and sun 12-3" are two (both sides have a time).
+      .replace(new RegExp(`\\b(${DAY_WORD}) and (?=(?:${DAY_WORD})\\b)`, "g"), (m, a, at, str) => {
+        const before = str.slice(0, at).split(/[;,]|\band\b/).pop() + a;
+        const after = str.slice(at + m.length).split(/[;,]|\band\b/)[0];
+        return !findTimes(before).length || (EXCEPT.test(before) && !findTimes(after).length) ? `${a} & ` : m;
+      });
+    // Clauses, each remembering whether "and" (not a comma) came right before it.
+    const parts = s.split(/([;,]|\band\b)/);
+    const clauses = [], andBefore = [];
+    parts.forEach((p, i) => {
+      if (i % 2 || !p.trim()) return;
+      // "hh 4-6 m-f except fri 3-5", "hh 4-6 except sun all day": the left-out day has its
+      // own time, so it becomes a clause of its own ("…except fri" + "fri 3-5").
+      const ex = EXCEPT.exec(p), end = ex && ex.index + ex[0].length;
+      if (ex && findTimes(p.slice(0, ex.index)).length && findTimes(p.slice(end)).length) {
+        clauses.push(p.slice(0, end).trim(), (ex[0].replace(/\b(?:except|excluding|no|not|closed)\b/g, " ") + p.slice(end)).trim());
+        andBefore.push(parts[i - 1] === "and", false);
+        return;
+      }
+      clauses.push(p.trim());
+      andBefore.push(parts[i - 1] === "and");
+    });
     const windows = [];
     let prevDays = null;
     let pendingDays = null; // days-only clause waiting for a times-only clause
+    let lastTimed = false;  // the clause just before had times and days of its own
 
     clauses.forEach((c, i) => {
       const days = findDays(c);
@@ -129,10 +169,26 @@
         times.forEach((t) => windows.push({ days: useDays, start: t.start, end: t.end, kind: "hh", text: c }));
         prevDays = useDays;
         pendingDays = null;
+        lastTimed = !!days;
+        return;
+      }
+      const wasTimed = lastTimed;
+      lastTimed = false;
+      if (days && days.onlyExcept && prevDays) {
+        // "hh 3-6, except sundays": take those days out of the clause before.
+        const left = prevDays.filter((d) => !days.onlyExcept.includes(d));
+        windows.forEach((w) => { if (w.days === prevDays) w.days = left; });
+        prevDays = left;
+      } else if (days && wasTimed && andBefore[i] && DAYS_ONLY.test(c)) {
+        // "hh 4-6 mon and tue", "10pm-2am fri and sat": more days for the clause before.
+        const more = [...new Set([...prevDays, ...days])].sort();
+        windows.forEach((w) => { if (w.days === prevDays) w.days = more; });
+        prevDays = more;
+        lastTimed = true;
       } else if (days) {
         const next = clauses[i + 1];
         if (next && findTimes(next).length && !findDays(next)) pendingDays = days;
-        else windows.push({ days, start: 0, end: 24 * 60, kind: "special", text: c });
+        else if (!days.onlyExcept) windows.push({ days, start: 0, end: 24 * 60, kind: "special", text: c }); // "closed mon" isn't a special
       }
     });
 

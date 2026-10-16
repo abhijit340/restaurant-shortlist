@@ -60,6 +60,8 @@ function doGet(e) {
       // The browser map key (locked to the app's web address and to Maps JavaScript only).
       mapsKey: PropertiesService.getScriptProperties().getProperty('MAPS_BROWSER_KEY') || '',
       loadedAt: new Date().toISOString(),
+      // The verdicts this script accepts, so a newer app can hide any it doesn't.
+      verdicts: VERDICTS,
     });
   } catch (err) {
     return json_({ error: String(err) });
@@ -116,9 +118,14 @@ const BATCH_INTERVAL_MS = 12000;       // 10 requests per 12 s = 50 a minute, un
  */
 function fillMissing() {
   const lock = LockService.getScriptLock();
-  if (!lock.tryLock(1000)) return notify_('Already running. Check the "app data" tab in a few minutes.');
+  if (!lock.tryLock(1000)) {
+    // Another run (often the nightly refresh) holds the lock: try again shortly so the chain isn't lost.
+    deleteTriggers_('continueFill');
+    ScriptApp.newTrigger('continueFill').timeBased().after(60 * 1000).create();
+    return notify_('Already running. Check the "app data" tab in a few minutes.');
+  }
   const started = Date.now();
-  let data, places, done = 0, remaining = 0, stopReason = '';
+  let data, places, before, done = 0, remaining = 0, stopReason = '';
   try {
     deleteTriggers_('continueFill');
     ensureNightly_();
@@ -127,13 +134,20 @@ function fillMissing() {
 
     places = readAllPlaces_();
     data = readAppData_();
+    before = typingOf_(data);
     recheckNames_(data);
-    const todo = places.filter(p => needsLookup_(p, data.get(p.key)));
+    // Places Google refused last time (billing off, bad key) go last and are tried one at a
+    // time until a lookup works, so a lasting refusal doesn't re-spend the cap every night.
+    const refused = (p) => REFUSED_STATUS.test((data.get(p.key) || {}).status);
+    const todo = places.filter(p => needsLookup_(p, data.get(p.key)))
+      .sort((a, b) => refused(a) - refused(b));
     remaining = todo.length;
+    let probing = true;
 
-    for (let i = 0; i < todo.length; i += BATCH) {
+    for (let i = 0; i < todo.length;) {
       if (Date.now() - started > RUN_BUDGET_MS) { stopReason = 'time'; break; }
-      const batch = todo.slice(i, i + BATCH);
+      const batch = todo.slice(i, i + (probing && refused(todo[i]) ? 1 : BATCH));
+      i += batch.length;
       if (!spend_('textSearch', batch.length)) { stopReason = 'limit'; break; }
       const t0 = Date.now();
       const responses = UrlFetchApp.fetchAll(batch.map(p => searchRequest_(p, apiKey)));
@@ -147,15 +161,26 @@ function fillMissing() {
         remaining--;
       });
       if (rateLimited) { stopReason = 'rate'; break; }
+      if (responses.some(r => refused_(r.getResponseCode(), r.getContentText()))) { stopReason = 'refused'; break; }
+      probing = false;
       const wait = BATCH_INTERVAL_MS - (Date.now() - t0);
-      if (wait > 0 && i + BATCH < todo.length) Utilities.sleep(wait);
+      if (wait > 0 && i < todo.length) Utilities.sleep(wait);
     }
   } finally {
-    if (data && places) writeAppData_(data, places);
-    lock.releaseLock();
+    // The re-read can throw (say, a damaged header row); the lock must still be released.
+    try {
+      if (data && places) writeAppData_(withLatestTyping_(data, before), places);
+    } finally {
+      lock.releaseLock();
+    }
   }
 
-  if (remaining > 0 && stopReason !== 'limit') {
+  // Google kept saying "too fast" (say, a lowered quota): after a few tries in a row, leave it
+  // to the nightly run instead of spending the cap every minute.
+  const props = PropertiesService.getScriptProperties();
+  const rateStreak = stopReason === 'rate' ? Number(props.getProperty('fill:rateStreak') || 0) + 1 : 0;
+  props.setProperty('fill:rateStreak', String(rateStreak));
+  if (remaining > 0 && stopReason !== 'limit' && stopReason !== 'refused' && rateStreak < 3) {
     ScriptApp.newTrigger('continueFill').timeBased().after(60 * 1000).create();
   }
   const counts = { 'not found': 0, 'check name': 0 };
@@ -164,12 +189,50 @@ function fillMissing() {
     `Looked up ${done} places.`,
     remaining === 0 ? 'All done.'
       : stopReason === 'limit' ? `${remaining} left, but this month's safety cap was reached. They'll be filled next month.`
+      : stopReason === 'refused' ? `${remaining} left, but Google refused the lookups. Check billing and the API key; they'll be retried tonight.`
+      : rateStreak >= 3 ? `${remaining} left, but Google keeps saying "too many requests". They'll be retried tonight.`
       : `${remaining} left. Continuing automatically in about a minute.`,
     `Not found: ${counts['not found']}. Check name: ${counts['check name']}. (See the "${DATA_TAB}" tab.)`,
   ].join(' '));
+  return stopReason; // nightlyFill skips the refresh when Google refused
 }
 
 function continueFill() { fillMissing(); }
+
+const TYPED_FIELDS = ['status', 'visited', 'verdict', 'dealsSeen', 'visitNotes', 'edits'];
+
+/** What a person can type into each record, as the run first read the tab (see withLatestTyping_). */
+function typingOf_(data) {
+  const out = new Map();
+  data.forEach((r, key) => {
+    const t = {};
+    for (const f of TYPED_FIELDS) t[f] = f === 'edits' ? JSON.stringify(r.edits || {}) : r[f];
+    out.set(key, t);
+  });
+  return out;
+}
+
+/**
+ * A long run rewrites the tab from what it read minutes earlier. Re-read it just before
+ * writing so what you typed in the meantime (a visit cell, an ok/skip status) isn't
+ * reverted. The lock keeps other script runs out, so anything newer was typed by hand.
+ * Only cells that changed since `before` (typingOf_ when the run read the tab) count as
+ * typed: an "ok" the row already had must not undo this run's own status change (say,
+ * "error 404" for a retired place). Without `before`, every re-read cell counts.
+ */
+function withLatestTyping_(data, before) {
+  readAppData_().forEach((latest, key) => {
+    const rec = data.get(key);
+    if (!rec) { data.set(key, latest); return; }
+    const now = typingOf_(new Map([[key, latest]])).get(key);
+    const was = before && before.get(key);
+    const typed = (f) => !was || now[f] !== was[f];
+    for (const f of ['visited', 'verdict', 'dealsSeen', 'visitNotes', 'edits']) if (typed(f)) rec[f] = latest[f];
+    // A typed ok/skip counts unless this run searched again with different text.
+    if (typed('status') && MANUAL_STATUSES.includes(latest.status) && rec.query === latest.query) rec.status = latest.status;
+  });
+  return data;
+}
 
 const QUICK_FILL_MAX = 20; // few enough to answer the phone in a few seconds, under the per-minute quota
 
@@ -186,26 +249,32 @@ function quickFill_(max) {
     const places = readAllPlaces_();
     const data = readAppData_();
     const waiting = (list) => list.filter(p => needsLookup_(p, data.get(p.key)));
-    const now = waiting(places).slice(0, max);
-    if (now.length) {
-      if (!spend_('textSearch', now.length)) return { error: 'monthly-limit' };
-      for (let i = 0; i < now.length; i += BATCH) {
-        const batch = now.slice(i, i + BATCH);
-        const res = UrlFetchApp.fetchAll(batch.map(p => searchRequest_(p, apiKey)));
-        watch_('place lookup', res[0]);
-        batch.forEach((p, j) => {
-          const rec = toRecord_(p, res[j].getResponseCode(), res[j].getContentText());
-          if (rec.status !== 'retry') data.set(p.key, carryVisit_(rec, data.get(p.key)));
-        });
-      }
-      writeAppData_(data, places);
+    // As in fillMissing: places Google refused last time go last, and are probed one at a time.
+    const refused = (p) => REFUSED_STATUS.test((data.get(p.key) || {}).status);
+    const now = waiting(places).sort((a, b) => refused(a) - refused(b)).slice(0, max);
+    let looked = 0, stop = '';
+    for (let i = 0, probing = true; i < now.length; probing = false) {
+      const batch = now.slice(i, i + (probing && refused(now[i]) ? 1 : BATCH));
+      if (!spend_('textSearch', batch.length)) { stop = 'monthly-limit'; break; }
+      i += batch.length;
+      const res = UrlFetchApp.fetchAll(batch.map(p => searchRequest_(p, apiKey)));
+      watch_('place lookup', res[0]);
+      batch.forEach((p, j) => {
+        const rec = toRecord_(p, res[j].getResponseCode(), res[j].getContentText());
+        if (rec.status !== 'retry') data.set(p.key, carryVisit_(rec, data.get(p.key)));
+      });
+      looked += batch.length;
+      // Billing off or a bad key: stop, and leave the rest to the nightly run.
+      if (res.some(x => refused_(x.getResponseCode(), x.getContentText()))) { stop = 'refused'; break; }
     }
+    if (looked) writeAppData_(data, places);
+    if (stop) return { error: stop, looked };
     const remaining = waiting(places).length;
     if (remaining) {
       deleteTriggers_('continueFill');
       ScriptApp.newTrigger('continueFill').timeBased().after(60 * 1000).create();
     }
-    return { ok: true, looked: now.length, remaining };
+    return { ok: true, looked, remaining };
   } finally {
     lock.releaseLock();
   }
@@ -214,8 +283,8 @@ function quickFill_(max) {
 /** Runs at 3 am: look up new rows, then refresh the oldest hours. */
 function nightlyFill() {
   try {
-    fillMissing();
-    refreshStale_(REFRESH_PER_NIGHT, REFRESH_AFTER_DAYS);
+    // If Google refused the lookups (billing off, bad key), the refresh would only be refused too.
+    if (fillMissing() !== 'refused') refreshStale_(REFRESH_PER_NIGHT, REFRESH_AFTER_DAYS);
     setHealth_('nightly', { ok: true });
   } catch (err) {
     setHealth_('nightly', { ok: false, msg: String(err).slice(0, 200) });
@@ -265,6 +334,14 @@ function healthFrom_(props, places, now) {
     out.push('The script found no places. Check that the restaurant tab and its section headings ("To Try", "would recommend / want to return") still have exactly those names.');
   } else if (!places.some(p => p.section === 'try' && !p.added)) {
     out.push('The "To Try" heading wasn\'t found in the restaurant tab, so those places are missing. Check its spelling.');
+  } else if (props['list:damagedSince']) {
+    const since = new Date(props['list:damagedSince']).getTime();
+    if (daysAgo(since) < DAMAGE_HOLD_DAYS) {
+      const gone = Number(props['list:goneCount']);
+      out.push((gone > 0 ? gone + ' places' : 'Many places') + ' left the restaurant tab on ' + day(since) +
+        '. If a section heading was renamed by mistake, fix it; their Google data is kept until ' +
+        day(since + DAMAGE_HOLD_DAYS * 86400000) + '. If you removed them on purpose, nothing to do.');
+    }
   }
 
   const month = Utilities.formatDate(now, 'America/Los_Angeles', 'yyyy-MM');
@@ -305,13 +382,14 @@ function refreshHoursNow() { refreshStale_(10, 0); }
 function refreshStale_(limit, minAgeDays) {
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(1000)) return notify_('Busy with another update. Try again in a few minutes.');
-  let refreshed = 0, capped = false;
+  let refreshed = 0, capped = false, refusedStop = false;
   try {
     const apiKey = PropertiesService.getScriptProperties().getProperty('MAPS_KEY');
     if (!apiKey) throw new Error('MAPS_KEY is missing from Script Properties.');
     const places = readAllPlaces_();
     const byKey = new Map(places.map(p => [p.key, p]));
     const data = readAppData_();
+    const before = typingOf_(data);
     const due = pickStale_(places, data, new Date(), minAgeDays, limit);
 
     for (let i = 0; i < due.length; i += BATCH) {
@@ -334,15 +412,18 @@ function refreshStale_(limit, minAgeDays) {
         data.set(r.key, refreshFromSearch_(r, toRecord_(byKey.get(r.key), x.getResponseCode(), x.getContentText())));
       });
       refreshed += batch.length;
+      // Billing off or a bad key: stop, so the same oldest places aren't re-requested all night.
+      if (res.some(x => refused_(x.getResponseCode(), x.getContentText()))) { refusedStop = true; break; }
 
       const wait = BATCH_INTERVAL_MS - (Date.now() - t0);
       if (wait > 0 && i + BATCH < due.length) Utilities.sleep(wait);
     }
-    writeAppData_(data, places);
+    writeAppData_(withLatestTyping_(data, before), places);
   } finally {
     lock.releaseLock();
   }
-  notify_(`Refreshed hours for ${refreshed} places.` + (capped ? " Stopped at this month's safety cap." : ''));
+  notify_(`Refreshed hours for ${refreshed} places.` + (capped ? " Stopped at this month's safety cap." : '') +
+    (refusedStop ? ' Stopped because Google refused the requests. Check billing and the API key.' : ''));
 }
 
 function detailsRequest_(placeId, apiKey) {
@@ -643,10 +724,26 @@ function searchRequest_(p, apiKey) {
 }
 
 /** Turns one Google response into the record saved in the "app data" tab. */
+/**
+ * True when Google refused the request itself rather than this one place: 401/403
+ * (billing off, API disabled), or a 400 saying the API key is invalid or expired.
+ */
+function refused_(code, body) {
+  if (code === 401 || code === 403) return true;
+  if (code !== 400) return false;
+  try {
+    const err = JSON.parse(body).error || {};
+    return /API key/i.test(err.message || '') || JSON.stringify(err.details || []).includes('API_KEY_INVALID');
+  } catch (e) { return false; } // not JSON
+}
+
+/** A stored status left by a refused lookup (see refused_). */
+const REFUSED_STATUS = /^error (40[13]|400 \(bad key\))$/;
+
 function toRecord_(p, code, body) {
   if (code === 429) return { status: 'retry' }; // per-minute quota hit; try again next run
   const rec = { key: p.key, name: p.name, row: p.row, query: buildQuery_(p).text, at: today_(), locs: [] };
-  if (code !== 200) return Object.assign(rec, { status: 'error ' + code });
+  if (code !== 200) return Object.assign(rec, { status: 'error ' + code + (code === 400 && refused_(code, body) ? ' (bad key)' : '') });
   const found = (JSON.parse(body).places || []).filter(g => g.location);
   if (!found.length) return Object.assign(rec, { status: 'not found' });
   const matches = found.filter(g => namesMatch_(p.name, g.displayName && g.displayName.text));
@@ -754,7 +851,11 @@ function refreshFromDetails_(rec, code, body) {
 function refreshFromSearch_(old, fresh) {
   if (fresh.status === 'retry' || /^error/.test(fresh.status)) return old;
   if (fresh.status === 'not found') return Object.assign({}, old, { at: today_() });
-  if (old.status === 'ok' && fresh.status === 'check name') fresh.status = 'ok'; // you'd approved it
+  if (old.status === 'ok' && fresh.status === 'check name') {
+    // You'd approved the old match. A doubtful result may be an unrelated place, or one
+    // branch of a chain you approved whole, so keep the approved locations as they are.
+    return Object.assign({}, old, { at: today_() });
+  }
   return carryVisit_(fresh, old);
 }
 
@@ -808,7 +909,8 @@ function addPlace_(body) {
     const loc = cleanLoc_(body.loc);
     if (loc) {
       const data = readAppData_();
-      data.set(key, { key, name, row: 'added', status: 'ok', query: buildQuery_({ name, hood }).text, at: today_(), locs: [loc] });
+      // Keep a visit or edits saved while the place was listed before (see dataToRows_).
+      data.set(key, carryVisit_({ key, name, row: 'added', status: 'ok', query: buildQuery_({ name, hood }).text, at: today_(), locs: [loc] }, data.get(key)));
       writeAppData_(data, readAllPlaces_());
     }
     return { ok: true, key };
@@ -852,7 +954,9 @@ function saveVisit_(body) {
     const data = readAppData_();
     const rec = data.get(place.key) ||
       { key: place.key, name: place.name, row: place.row, status: '', query: '', at: '', locs: [] };
-    data.set(place.key, applyVisit_(rec, body, today_()));
+    const next = applyVisit_(rec, body, today_());
+    if (next.error) return next;
+    data.set(place.key, next);
     writeAppData_(data, places);
     return { ok: true, visit: visitOf_(data.get(place.key)) };
   } finally {
@@ -860,12 +964,16 @@ function saveVisit_(body) {
   }
 }
 
-/** Sets (or, with no verdict, clears) the visit on a record. The first visit date is kept on edits. */
+/**
+ * Sets (or, with an empty verdict, clears) the visit on a record. The first visit date is kept on edits.
+ * A verdict this script doesn't know (an app newer than the script) is refused, never taken as "clear".
+ */
 function applyVisit_(rec, body, today) {
   const clip = (x) => String(x || '').trim().slice(0, 500);
-  if (!VERDICTS.includes(body.verdict)) {
+  if (body.verdict === '') {
     return Object.assign({}, rec, { visited: '', verdict: '', dealsSeen: '', visitNotes: '' });
   }
+  if (!VERDICTS.includes(body.verdict)) return { error: 'bad-verdict' };
   return Object.assign({}, rec, {
     visited: rec.visited || today, verdict: body.verdict, dealsSeen: clip(body.deals), visitNotes: clip(body.notes),
   });
@@ -1003,6 +1111,26 @@ function rowsToData_(header, rows) {
     query: col('Searched for'), json: col('data (JSON)'), edits: col('Edits (JSON)'),
     at: Math.max(col('Last updated'), col('Looked up')), // older tabs called it "Looked up"
   };
+  // Without its "key" column every row would be skipped and the next write would erase every visit.
+  if (rows.length && c.key < 0) throw new Error('The header row of the "' + DATA_TAB + '" tab is damaged (no "key" column). Put "key" back in cell A1.');
+  // Older tabs have none of the visit columns; a tab with only some of them was hand-edited.
+  const visitCols = [c.visited, c.verdict, c.dealsSeen, c.visitNotes];
+  if (rows.length && visitCols.some(i => i >= 0) && visitCols.some(i => i < 0)) {
+    throw new Error('The header row of the "' + DATA_TAB + '" tab is damaged (a visit column is missing or renamed).');
+  }
+  // Every layout has had "data (JSON)"; without it every place would read as never looked up.
+  if (rows.length && c.json < 0) throw new Error('The header row of the "' + DATA_TAB + '" tab is damaged (no "data (JSON)" column).');
+  // "Edits (JSON)" came after the visit columns, so a tab from in between has visits but no
+  // edits. Such a tab has only known, non-blank headers; a blank or unknown one means the
+  // edits column was renamed or cleared, and the next write would erase every edit.
+  if (rows.length && c.visited >= 0 && c.edits < 0) {
+    const known = DATA_HEADERS.concat('Looked up');
+    let last = header.length - 1;
+    while (last >= 0 && !header[last]) last--; // a wider, older layout's cleared columns
+    if (header.slice(0, last + 1).some(h => !known.includes(h))) {
+      throw new Error('The header row of the "' + DATA_TAB + '" tab is damaged ("Edits (JSON)" is missing or renamed).');
+    }
+  }
   const get = (r, i) => (i < 0 || r[i] == null ? '' : r[i]);
   // What someone typed in the app, as text. Older tabs let Sheets turn "5-6" into
   // a date (May 6); turn that back. A leading apostrophe left by safeCell_ is dropped.
@@ -1046,9 +1174,10 @@ function hasYourNotes_(r) {
  * A place that is no longer in the list (renamed, removed, moved to AVOID, or
  * hidden because a section heading was mistyped) loses its Google data, which can
  * be looked up again, but a visit or edit made in the app can't be: those rows are
- * kept at the bottom, and are picked up again if the place comes back.
+ * kept at the bottom, and are picked up again if the place comes back. With keepAll
+ * (the list looks damaged, see listLooksDamaged_) every record is kept, Google data too.
  */
-function dataToRows_(data, places) {
+function dataToRows_(data, places, keepAll) {
   const rows = [];
   const colors = [];
   const add = (r, name, row) => {
@@ -1065,8 +1194,70 @@ function dataToRows_(data, places) {
     listed.add(p.key);
     add(r, p.name, p.row);
   }
-  data.forEach(r => { if (!listed.has(r.key) && hasYourNotes_(r)) add(r, r.name, NOT_LISTED); });
+  data.forEach(r => {
+    if (listed.has(r.key) || !(keepAll || hasYourNotes_(r))) return;
+    // Kept only because the list looks damaged: labelled so the next healthy write prunes it.
+    add(r, r.name, hasYourNotes_(r) || r.row === NOT_LISTED ? NOT_LISTED : MISSING);
+  });
   return { rows, colors };
+}
+
+const MISSING = 'missing from the list (kept)';
+
+/**
+ * True when the restaurant tab looks broken rather than edited: the "To Try" heading
+ * isn't found (as in healthFrom_), or over a quarter of the listed places vanished at
+ * once. Rewriting then would throw away Google data that costs hundreds of capped
+ * lookups to rebuild. Rows already kept (MISSING / NOT_LISTED) don't count as listed;
+ * keepAllRows_ decides how long the kept rows stay.
+ */
+function listLooksDamaged_(data, places) {
+  if (!places.some(p => p.section === 'try' && !p.added)) return true;
+  const keys = new Set(places.map(p => p.key));
+  let wasListed = 0, gone = 0;
+  data.forEach(r => {
+    if (r.row === NOT_LISTED || r.row === MISSING) return;
+    wasListed++;
+    if (!keys.has(r.key)) gone++;
+  });
+  return gone > 10 && gone > wasListed / 4;
+}
+
+const DAMAGE_HOLD_DAYS = 7;
+
+/**
+ * Whether this write keeps every record (see dataToRows_). Once the list looks damaged,
+ * the date is stored in 'list:damagedSince' and kept ("missing") rows stay, Google data
+ * too, on every write until they're back in the list or DAMAGE_HOLD_DAYS have passed;
+ * after that a removal that stands is taken as an edit and they're pruned.
+ * props = Script Properties (getProperty / setProperty / deleteProperty).
+ */
+function keepAllRows_(data, places, props, now) {
+  const since = props.getProperty('list:damagedSince');
+  const age = (now.getTime() - new Date(since).getTime()) / 86400000; // an unreadable date counts as expired
+  const keys = new Set(places.map(p => p.key));
+  let stillMissing = false, newlyGone = 0;
+  data.forEach(r => {
+    if (keys.has(r.key)) return;
+    if (r.row === MISSING) stillMissing = true;
+    else if (r.row !== NOT_LISTED) newlyGone++;
+  });
+  if (listLooksDamaged_(data, places)) {
+    // A new hold starts when nothing is held yet, or when more places left the list after
+    // an old hold expired. An expired hold whose list hasn't changed since (say, an emptied
+    // "To Try" section) stays expired: the date is kept so it doesn't restart every week.
+    if (!since || (!(age < DAMAGE_HOLD_DAYS) && newlyGone)) {
+      props.setProperty('list:damagedSince', now.toISOString());
+      props.setProperty('list:goneCount', String(newlyGone));
+      return true;
+    }
+    return age < DAMAGE_HOLD_DAYS;
+  }
+  if (!since) return false;
+  if (stillMissing && age < DAMAGE_HOLD_DAYS) return true;
+  props.deleteProperty('list:damagedSince');
+  props.deleteProperty('list:goneCount');
+  return false;
 }
 
 /**
@@ -1078,7 +1269,8 @@ function dataToRows_(data, places) {
 function writeAppData_(data, places) {
   const ss = SpreadsheetApp.getActive();
   const sheet = ss.getSheetByName(DATA_TAB) || ss.insertSheet(DATA_TAB);
-  const { rows, colors } = dataToRows_(data, places);
+  const keepAll = keepAllRows_(data, places, PropertiesService.getScriptProperties(), new Date());
+  const { rows, colors } = dataToRows_(data, places, keepAll);
   const width = DATA_HEADERS.length;
   const all = [DATA_HEADERS].concat(rows);
   const statusCol = DATA_HEADERS.indexOf('Status') + 1;

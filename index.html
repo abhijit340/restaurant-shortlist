@@ -82,13 +82,13 @@
        other links on the card sit above it. */
     .place { position: relative; }
     .place:active { background: var(--chip); }
-    .place h2 { font-size: 1.05rem; margin: 0; flex: 1; }
+    .place h2 { font-size: 1.05rem; margin: 0; flex: 1; min-width: 0; overflow-wrap: anywhere; }
     .place h2 a { color: inherit; text-decoration: none; }
     .place h2 a::after { content: ""; position: absolute; inset: 0; border-radius: 12px; }
     .place .above { position: relative; z-index: 1; }
     .place .top { display: flex; gap: 12px; align-items: baseline; margin-bottom: 4px; }
     .dist { font-weight: 600; color: var(--accent); white-space: nowrap; font-variant-numeric: tabular-nums; }
-    .place p { margin: 4px 0 0; }
+    .place p { margin: 4px 0 0; overflow-wrap: anywhere; } /* a pasted link mustn't widen the page */
     .meta { color: var(--muted); font-size: .9rem; }
     .meta a { color: inherit; }
     .meta b { color: var(--text); font-weight: 600; }
@@ -233,7 +233,7 @@
   <button id="more" hidden>Show more</button>
 
   <footer>
-    v0.32 · <a href="help.html">Help</a> · <a href="colors.html">Colors</a><span id="reconnect" hidden> · <button class="link" id="share">Share setup link</button> · <button class="link" id="reconnect-btn">Change Sheet connection</button></span>
+    v0.33 · <a href="help.html">Help</a> · <a href="colors.html">Colors</a><span id="reconnect" hidden> · <button class="link" id="share">Share setup link</button> · <button class="link" id="reconnect-btn">Change Sheet connection</button></span>
   </footer>
 </main>
 
@@ -410,6 +410,8 @@
       "busy": "The Sheet is busy with an update right now. Try again in a few minutes.",
       "no-such-place": "That place isn't in the Sheet any more. Tap Refresh.",
       "already-listed": "That place is already on the list.",
+      "bad-verdict": "This rating isn't supported by the Sheet's script yet.",
+      "refused": "Google refused the lookup — check billing and the Maps API key in the Sheet's setup.",
     };
     const err = new Error(messages[data.error] || "The Sheet's script had a problem: " + data.error);
     err.code = data.error;
@@ -421,6 +423,8 @@
     2: "Couldn't get a location (is Location on?), so the list is A–Z.",
     3: "Location timed out, so the list is A–Z. Tap Refresh to try again.",
   };
+
+  let locateSeq = 0; // only the latest location request may set state.here
 
   function locate() {
     const planned = state.plan.place;
@@ -444,15 +448,39 @@
       .catch((err) => { throw new Error(LOCATION_ERRORS[err.code] || err.message); });
   }
 
-  /** Puts a list (fresh from the Sheet, or the saved copy) on screen. */
-  function useList(d) {
+  function readDeals(p) {
+    p.dealWindows = Deals.parseDeals(p.deals).windows;
+    p.inkind = /\binkind\b/i.test(`${p.deals} ${p.desc}`); // inKind dining credit accepted
+  }
+
+  // Visits and edits saved this session, by place key: { fields, at }. A list that was
+  // asked for before a save finished doesn't have it yet, so it's laid on top.
+  const recentSaves = {};
+
+  /** After a save: update the place on screen (found by key) and the saved copy of the list. */
+  function rememberSave(key, fields) {
+    recentSaves[key] = { fields: { ...recentSaves[key]?.fields, ...fields }, at: Date.now() };
+    const p = state.places.find((x) => x.key === key);
+    if (p) { Object.assign(p, fields); readDeals(p); }
+    const saved = loadJSON(LIST_KEY);
+    const s = saved?.places?.find((x) => x.key === key);
+    if (s) { Object.assign(s, fields); saveJSON(LIST_KEY, saved); }
+  }
+
+  /** Puts a list (fresh from the Sheet, or the saved copy) on screen. `askedAt`: when it was requested. */
+  function useList(d, askedAt = 0) {
     state.places = d.places;
     state.mapsKey = d.mapsKey || "";
     state.health = d.health || [];
-    for (const p of state.places) {
-      p.dealWindows = Deals.parseDeals(p.deals).windows;
-      p.inkind = /\binkind\b/i.test(`${p.deals} ${p.desc}`); // inKind dining credit accepted
+    // Verdicts the Sheet's script can save. The v0.32 script sends no list but already takes
+    // Bad; anything older is caught by the check after saving.
+    state.verdicts = Array.isArray(d.verdicts) ? d.verdicts : ["Loved", "Good", "Meh", "Bad"];
+    for (const [key, s] of Object.entries(recentSaves)) {
+      if (askedAt > s.at) { delete recentSaves[key]; continue; } // this list already has it
+      const p = state.places.find((x) => x.key === key);
+      if (p) Object.assign(p, s.fields);
     }
+    for (const p of state.places) readDeals(p);
     state.shown = PAGE;
     fillTagOptions();
     updatePlanUI();
@@ -473,7 +501,9 @@
     forgetFailedTimes();
 
     // Ask the Sheet for the list and find your location at the same time…
+    const askedAt = Date.now();
     const fetching = callScript(cfg).then((value) => ({ value }), (reason) => ({ reason }));
+    const seq = ++locateSeq;
     const locating = locate().then((value) => ({ value }), (reason) => ({ reason }));
 
     // …and meanwhile show the list saved from last time, so the app opens instantly.
@@ -487,15 +517,17 @@
     }
 
     const here = await locating;
-    state.here = here.value || null;
-    state.hereError = here.reason ? here.reason.message : "";
+    if (seq === locateSeq) { // unless a plan chosen meanwhile has already set the start
+      state.here = here.value || null;
+      state.hereError = here.reason ? here.reason.message : "";
+    }
     if (state.places.length) render(); // sorted by distance as soon as we know where you are
 
     const data = await fetching;
     $("refresh").disabled = false;
     state.updating = false;
     if (data.value) {
-      useList(data.value);
+      useList(data.value, askedAt);
       saveJSON(LIST_KEY, data.value);
     } else if (state.places.length) {
       // No answer from the Sheet (usually no signal): keep what we have.
@@ -536,6 +568,16 @@
     for (const [k, v] of Object.entries(state.times.byKey)) if (v.failed) delete state.times.byKey[k];
   }
 
+  /**
+   * The saved time for row `x`, or undefined if there is none for the branch it
+   * now points at (a chain's nearest open branch can change with the hour).
+   * Times saved before the destination was stored count as missing.
+   */
+  function cachedTime(times, x) {
+    const t = times.byKey[x.p.key];
+    return t && t.to && t.to.lat === x.near.loc.lat && t.to.lng === x.near.loc.lng ? t : undefined;
+  }
+
   let timesTimer = null;
   /** Asks the Sheet's script for walking + transit times to the nearest places that don't have them yet. */
   function requestTimes(nearest) {
@@ -547,21 +589,22 @@
     const cfg = loadJSON(CONFIG_KEY);
     if (!cfg || !state.here || state.timesLoading || state.timesError || state.offline) return;
     const times = timesFor(state.here);
-    const need = nearest.filter((x) => !times.byKey[x.p.key]);
+    const need = nearest.filter((x) => !cachedTime(times, x));
     if (!need.length) return;
 
     state.timesLoading = true;
     updateStatus();
     const ll = (pt) => `${pt.lat.toFixed(5)},${pt.lng.toFixed(5)}`;
+    const to = (x) => ({ lat: x.near.loc.lat, lng: x.near.loc.lng }); // the branch timed, see cachedTime()
     try {
       const data = await callScript(cfg,
         `&action=times&from=${ll(times.origin)}&to=${need.map((x) => ll(x.near.loc)).join("|")}` +
         (times.when ? `&when=${times.when}` : ""));
-      need.forEach((x, i) => { times.byKey[x.p.key] = { walk: data.walk[i], transit: data.transit[i] }; });
+      need.forEach((x, i) => { times.byKey[x.p.key] = { walk: data.walk[i], transit: data.transit[i], to: to(x) }; });
       saveJSON(TIMES_KEY, state.times);
     } catch (err) {
       state.timesError = err.message;
-      need.forEach((x) => { times.byKey[x.p.key] = { failed: true }; }); // don't retry until Refresh
+      need.forEach((x) => { times.byKey[x.p.key] = { failed: true, to: to(x) }; }); // don't retry until Refresh
     } finally {
       state.timesLoading = false;
       render();
@@ -628,14 +671,16 @@
     return 2 * R * Math.asin(Math.sqrt(h));
   }
 
-  /** For chains, the closest open location wins. */
-  function nearest(p, here) {
-    let found = null;
+  /** For chains, the closest location open (or opening soon) at `when` wins; if none is, the closest. */
+  function nearest(p, here, when) {
+    let found = null, open = null;
     for (const loc of p.locs || []) {
       const d = miles(here, loc);
       if (!found || d < found.d) found = { d, loc };
+      const info = openInfo(loc.hours, when);
+      if ((!info || info.open || info.opensIn <= OPENS_SOON) && (!open || d < open.d)) open = { d, loc };
     }
-    return found;
+    return open || found;
   }
 
   function formatMiles(d) {
@@ -664,23 +709,24 @@
     const t0 = now();
 
     // 1. Everything that passes the basic filters, nearest first.
-    const rows = state.places.filter((p) => matches(p, f)).map((p) => ({ p, near: here ? nearest(p, here) : null }));
+    const rows = state.places.filter((p) => matches(p, f)).map((p) => ({ p, near: here ? nearest(p, here, t0) : null }));
     rows.sort((a, b) => (a.near ? a.near.d : Infinity) - (b.near ? b.near.d : Infinity) || a.p.name.localeCompare(b.p.name));
 
     // 2. The nearest few get real travel times (fetched in the background if missing).
     //    timesFor() first drops saved times if you've moved or they're old.
     //    Places that look closed are passed over, so late at night the lookups go to
     //    the nearest places you could actually eat at; any slots left go to closed ones.
+    //    Places marked Bad likewise wait behind the others.
     const located = rows.filter((x) => x.near);
-    const toTime = located.filter((x) => couldBeOpen(x, t0)).slice(0, TIMED);
-    if (toTime.length < TIMED) toTime.push(...located.filter((x) => !couldBeOpen(x, t0)).slice(0, TIMED - toTime.length));
+    const tiers = new Map(located.map((x) => [x, (couldBeOpen(x, t0) ? 0 : 2) + (x.p.visit?.verdict === "Bad" ? 1 : 0)]));
+    const toTime = [...located].sort((a, b) => tiers.get(a) - tiers.get(b)).slice(0, TIMED);
     if (here) { timesFor(here); requestTimes(toTime); }
     const timed = new Set(toTime.map((x) => x.p.key));
     state.timedCount = toTime.length;
 
     // 3. Arrival time and opening hours on arrival.
     for (const x of rows) {
-      x.trip = timed.has(x.p.key) ? trip(state.times.byKey[x.p.key]) : null;
+      x.trip = timed.has(x.p.key) ? trip(cachedTime(state.times, x)) : null;
       x.arrive = new Date(t0.getTime() + (x.trip ? x.trip.min : 0) * 60000);
       const tempClosed = x.p.closed === "closed temporarily";
       x.hours = x.near && !tempClosed ? openInfo(x.near.loc.hours, x.arrive) : null;
@@ -702,7 +748,8 @@
     // 4. Time-based filters.
     let list = rows;
     if (f.open) list = list.filter((x) => !x.closedOnArrival);
-    if (f.max) list = list.filter((x) => x.trip && x.trip.fastest <= f.max);
+    // Places without a travel time go by a walking estimate from the distance.
+    if (f.max) list = list.filter((x) => (x.trip ? x.trip.fastest : x.near ? x.near.d * EST_MIN_PER_MILE : Infinity) <= f.max);
 
     // 5. Places closed when you'd arrive (shown greyed out) go to the very bottom,
     //    and places marked Bad sit just above them.
@@ -1212,8 +1259,8 @@
     try {
       const data = await postScript(loadJSON(CONFIG_KEY), { action: "edit", place: editing.key, desc, deals });
       Object.assign(editing, { desc: data.desc, deals: data.deals, edited: data.edited });
-      editing.dealWindows = Deals.parseDeals(editing.deals).windows;
-      editing.inkind = /\binkind\b/i.test(`${editing.deals} ${editing.desc}`);
+      readDeals(editing);
+      rememberSave(editing.key, { desc: data.desc, deals: data.deals, edited: data.edited });
       $("edit").close();
       render();
     } catch (err) {
@@ -1249,6 +1296,7 @@
     visiting = p;
     const v = p.visit || {};
     $("visit-title").textContent = p.name;
+    document.querySelectorAll("[data-verdict]").forEach((b) => { b.hidden = !state.verdicts?.includes(b.dataset.verdict); });
     setVerdict(v.verdict || "");
     $("visit-deals").value = v.deals || "";
     $("visit-notes").value = v.notes || "";
@@ -1267,7 +1315,17 @@
         action: "visit", place: visiting.key, verdict,
         deals: $("visit-deals").value, notes: $("visit-notes").value,
       });
+      if (verdict && data.visit?.verdict !== verdict) {
+        // An older copy of the script that doesn't know this verdict (it may have erased the visit):
+        // show what the Sheet now has, and keep the dialog open with what was typed.
+        visiting.visit = data.visit;
+        rememberSave(visiting.key, { visit: data.visit });
+        render();
+        $("visit-remove").hidden = !data.visit;
+        throw new Error("Your visit couldn't be saved: the Sheet's script needs updating first. Your notes are still here.");
+      }
       visiting.visit = data.visit;
+      rememberSave(visiting.key, { visit: data.visit });
       $("visit").close();
       render();
     } catch (err) {
@@ -1283,7 +1341,9 @@
   $("visit-form").addEventListener("submit", (e) => {
     e.preventDefault();
     if (!chosenVerdict()) {
-      $("visit-error").textContent = "Pick Loved, Good, Meh, or Bad first.";
+      const v = state.verdicts || [];
+      const choices = v.length > 2 ? v.slice(0, -1).join(", ") + ", or " + v[v.length - 1] : v.join(" or ");
+      $("visit-error").textContent = `Pick ${choices || "a rating"} first.`;
       $("visit-error").hidden = false;
       return;
     }
@@ -1418,6 +1478,15 @@
     $("setup-error").hidden = true;
     try {
       await callScript(cfg); // test the connection before saving it
+      const was = loadJSON(CONFIG_KEY);
+      if (!was || was.url !== cfg.url || was.key !== cfg.key) {
+        // A different Sheet: don't show the old one's list or travel times.
+        try { localStorage.removeItem(LIST_KEY); localStorage.removeItem(TIMES_KEY); } catch {}
+        state.places = [];
+        state.times = { origin: null, at: 0, byKey: {} };
+        state.timesAside = null;
+        for (const k in recentSaves) delete recentSaves[k];
+      }
       saveJSON(CONFIG_KEY, cfg);
       load();
     } catch (err) {
@@ -1481,13 +1550,12 @@
     updatePlanUI();
     state.timesError = "";
     forgetFailedTimes();
-    try {
-      state.here = await locate();
-      state.hereError = "";
-    } catch (err) {
-      state.here = null;
-      state.hereError = err.message;
-    }
+    const seq = ++locateSeq;
+    let here = null, error = "";
+    try { here = await locate(); } catch (err) { error = err.message; }
+    if (seq !== locateSeq) return; // a newer plan was chosen while this one was locating
+    state.here = here;
+    state.hereError = error;
     state.shown = PAGE;
     render();
   }
@@ -1557,6 +1625,8 @@
         updateStatus();
       }
     } catch (err) {
+      // A refused or capped run may still have looked some places up: show them.
+      if (err.code === "refused" || err.code === "monthly-limit") await load().catch(() => {});
       state.listNote = err.message;
       updateStatus();
     } finally {

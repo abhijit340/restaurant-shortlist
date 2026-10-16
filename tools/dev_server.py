@@ -81,6 +81,7 @@ class Handler(SimpleHTTPRequestHandler):
                     place.update({f: x["now"] for f, x in e.items()})
                 place["edited"] = e or None
             body["places"] += ADDED
+            body["verdicts"] = ["Loved", "Good", "Meh", "Bad"]
         self.send_json(body)
 
     def do_POST(self):
@@ -125,8 +126,10 @@ class Handler(SimpleHTTPRequestHandler):
             body = {"error": "bad-request"}
         elif req.get("place") == "unplaced bakery":
             body = {"error": "busy"}  # lets the app's "Sheet is busy" message be tested
+        elif req.get("verdict") != "" and req.get("verdict") not in ("Loved", "Good", "Meh", "Bad"):
+            body = {"error": "bad-verdict"}  # like Code.gs: refused, the visit is kept; only "" clears
         else:
-            if req.get("verdict") in ("Loved", "Good", "Meh", "Bad"):
+            if req["verdict"]:
                 first = VISITS.get(req["place"], {}).get("date", "2026-10-02")
                 VISITS[req["place"]] = {"date": first, "verdict": req["verdict"],
                                         "deals": req.get("deals", "").strip(), "notes": req.get("notes", "").strip()}

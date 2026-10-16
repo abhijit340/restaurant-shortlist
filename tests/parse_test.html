@@ -66,8 +66,8 @@ const g = (name, lat, status = 'OPERATIONAL', periods = []) => ({
   const code = await (await fetch('../apps-script/Code.gs')).text();
   const { parseSheet, buildQuery_, toRecord_, namesMatch_, overallStatus_, needsLookup_, withAppData_, parseMatrix_, parseLatLng_,
     pickStale_, refreshFromDetails_, refreshFromSearch_, departureTime_, matrixRequest_, parseGeocode_,
-    rowsToData_, dataToRows_, applyVisit_, visitOf_, carryVisit_, DATA_HEADERS, parseAdded_, cleanLoc_, safeCell_, healthFrom_, applyEdit_ } =
-    new Function(code + '\nreturn { parseSheet, buildQuery_, toRecord_, namesMatch_, overallStatus_, needsLookup_, withAppData_, parseMatrix_, parseLatLng_, pickStale_, refreshFromDetails_, refreshFromSearch_, departureTime_, matrixRequest_, parseGeocode_, rowsToData_, dataToRows_, applyVisit_, visitOf_, carryVisit_, DATA_HEADERS, parseAdded_, cleanLoc_, safeCell_, healthFrom_, applyEdit_ };')();
+    rowsToData_, dataToRows_, applyVisit_, visitOf_, carryVisit_, DATA_HEADERS, parseAdded_, cleanLoc_, safeCell_, healthFrom_, applyEdit_, keepAllRows_ } =
+    new Function(code + '\nreturn { parseSheet, buildQuery_, toRecord_, namesMatch_, overallStatus_, needsLookup_, withAppData_, parseMatrix_, parseLatLng_, pickStale_, refreshFromDetails_, refreshFromSearch_, departureTime_, matrixRequest_, parseGeocode_, rowsToData_, dataToRows_, applyVisit_, visitOf_, carryVisit_, DATA_HEADERS, parseAdded_, cleanLoc_, safeCell_, healthFrom_, applyEdit_, keepAllRows_ };')();
   const places = parseSheet(SYNTHETIC);
   const find = (k) => places.find(p => p.key === k);
 
@@ -201,7 +201,9 @@ const g = (name, lat, status = 'OPERATIONAL', periods = []) => ({
     ['visit: saved with today\'s date, text trimmed and capped', visited.visited === '2026-10-02' && visited.dealsSeen === '$5 drafts till 6' && visited.visitNotes.length === 500],
     ['visit: editing keeps the first date', edited.visited === '2026-10-02' && edited.verdict === 'Meh' && edited.visitNotes === 'changed'],
     ['visit: Bad is a verdict', applyVisit_(recOld, { verdict: 'Bad', notes: 'cold food' }, '2026-10-16').verdict === 'Bad'],
-    ['visit: no verdict clears it', applyVisit_(visited, { verdict: '' }, 'x').verdict === '' && applyVisit_(visited, { verdict: 'Amazing' }, 'x').visited === ''],
+    ['visit: an empty verdict clears it', applyVisit_(visited, { verdict: '' }, 'x').verdict === '' && applyVisit_(visited, { verdict: '' }, 'x').visited === ''],
+    ['visit: an unknown verdict is refused, not taken as "clear"', applyVisit_(visited, { verdict: 'Amazing' }, 'x').error === 'bad-verdict'
+      && applyVisit_(visited, {}, 'x').error === 'bad-verdict' && applyVisit_(visited, { verdict: 'bad' }, 'x').error === 'bad-verdict'],
     ['visit: other fields untouched', visited.status === 'ok' && visited.locs.length === 1 && visited.query === recOld.query],
     ['visit: what the app receives', JSON.stringify(visitOf_(edited)) === '{"date":"2026-10-02","verdict":"Meh","deals":"","notes":"changed"}'],
     ['visit: a Sheets date object is sent as text', visitOf_({ verdict: 'Good', visited: new Date('2026-10-02T12:00:00Z') }).date === '2026-09-30'],
@@ -334,6 +336,805 @@ const g = (name, lat, status = 'OPERATIONAL', periods = []) => ({
     ['deals: the word "we" is not Wednesday', D('we liked the fries 4-6') === 'Daily 4 PM–6 PM' && D('hh we-fr 4-6') === 'Wed–Fri 4 PM–6 PM'],
     ['deals: "mmm" is not Monday', D('mmm good') === ''],
     ['deals: "4p-6p", "4 to 6", long dash', D('hh 4p-6p') === 'Daily 4 PM–6 PM' && D('hh 4 to 6') === 'Daily 4 PM–6 PM' && D('hh 3—6') === 'Daily 3 PM–6 PM'],
+  );
+
+  // ----- Deals wording that used to be misread -----
+  // 2026-09-28 is a Monday, 2026-09-30 a Wednesday, 2026-10-01 a Thursday.
+  checks.push(
+    ['deals: "10pm-2am" runs past midnight', D('late night 10pm-2am') === 'Daily 10 PM–2 AM'],
+    ['deals: "10pm-2am" is on at 11 PM and after midnight', at('late night 10pm-2am', '2026-10-02T23:00')?.status === 'now' && at('hh fri 9pm-1am', '2026-10-03T00:30')?.status === 'now'],
+    ['deals: "11-12" still ends at midnight', D('late hh 11-12') === 'Daily 11 PM–midnight'],
+    ['deals: "tues thru sat" is a range', D('hh tues thru sat 3-6') === 'Tue–Sat 3 PM–6 PM' && D('hh mon through wed 4-6') === 'Mon–Wed 4 PM–6 PM' && D('hh wed to fri 4-6') === 'Wed–Fri 4 PM–6 PM'],
+    ['deals: "tues thru sat" is on Wednesday', at('hh tues thru sat 3-6', '2026-09-30T16:00')?.status === 'now'],
+    ['deals: "except monday" leaves Monday out', at('daily except monday 3-6', '2026-09-28T16:00') === null && at('daily except monday 3-6', '2026-10-02T16:00')?.status === 'now'],
+    ['deals: "every day but mon" leaves Monday out', at('every day but mon 4-6', '2026-09-28T17:00') === null && at('every day but mon 4-6', '2026-09-30T17:00')?.status === 'now'],
+    ['deals: "no hh on sundays" is not Sunday-only', at('hh 3-6 (no hh on sundays)', '2026-10-04T16:00') === null && at('hh 3-6 (no hh on sundays)', '2026-10-02T16:00')?.status === 'now'],
+    ['deals: "hh 3-6, except sundays" takes Sunday out of the clause before', at('hh 3-6, except sundays', '2026-10-04T16:00') === null && at('hh 3-6, except sundays', '2026-10-03T16:00')?.status === 'now'],
+    ['deals: "closed mon" is not a Monday special', D('closed mon') === '' && at('closed mon', '2026-09-28T12:00') === null],
+    ['deals: "mon and tue 4-6" is one day list', D('hh mon and tue 4-6') === 'Mon–Tue 4 PM–6 PM' && at('hh mon and tue 4-6', '2026-09-28T12:00') === null],
+    ['deals: "and" between clauses still splits', D('hh mon 4-6 and tue 5-7') === 'Mon 4 PM–6 PM; Tue 5 PM–7 PM'],
+  );
+
+  // ----- Round 2: "but" adds days after a time; an exclusion stops at its time; "and" joins only bare days -----
+  checks.push(
+    ['deals: "weekdays, but sat 2-5" adds Saturday', D('hh 4-6 weekdays, but sat 2-5') === 'Mon–Fri 4 PM–6 PM; Sat 2 PM–5 PM'],
+    ['deals: "daily but sun 4-6" keeps Sunday', D('happy hour 2-5 daily but sun 4-6') === 'Daily 2 PM–5 PM; Daily 4 PM–6 PM' && at('happy hour 2-5 daily but sun 4-6', '2026-10-04T17:00')?.status === 'now'],
+    ['deals: "daily, but sundays all day"', D('hh 3-6 daily, but sundays all day') === 'Daily 3 PM–6 PM; Sun all day'],
+    ['deals: "daily but fri 3-6" keeps Friday', at('hh 4-6 daily but fri 3-6', '2026-10-02T15:30')?.status === 'now'],
+    ['deals: "weekdays 3-6 but weekends 2-5" keeps the weekend', at('weekdays 3-6 but weekends 2-5', '2026-10-03T14:30')?.status === 'now'],
+    ['deals: "but closed sun" still leaves Sunday out', D('hh 3-6 daily but closed sun') === 'Mon–Sat 3 PM–6 PM'],
+    ['deals: "but not on weekends" still leaves the weekend out', D('hh 4-6 but not on weekends') === 'Mon–Fri 4 PM–6 PM'],
+    ['deals: "every day but not mon 4-6"', D('every day but not mon 4-6') === 'Tue–Sun 4 PM–6 PM'],
+    ['deals: "every day but mon 4-6" (bare "but" after days, no time yet)', D('every day but mon 4-6') === 'Tue–Sun 4 PM–6 PM'],
+    ['deals: "every day but mon" with no time', D('every day but mon') === 'Tue–Sun (special, all day)'],
+    ['deals: "weekdays but fri 4-6"', D('weekdays but fri 4-6') === 'Mon–Thu 4 PM–6 PM'],
+    ['deals: an exclusion stops before its time', D('hh 3-6 daily, except mon 4-5') === 'Daily 3 PM–6 PM; Tue–Sun 4 PM–5 PM'],
+    ['deals: round-1 wording still read the same', D('hh 3-6 (no hh on sundays)') === 'Mon–Sat 3 PM–6 PM' && D('daily except monday 3-6') === 'Tue–Sun 3 PM–6 PM' && D('tues thru sat 3-6') === 'Tue–Sat 3 PM–6 PM' && D('10pm-2am') === 'Daily 10 PM–2 AM'],
+    ['deals: "m-f and sat 12-3" is two windows', D('hh 3-6 m-f and sat 12-3') === 'Mon–Fri 3 PM–6 PM; Sat 12 PM–3 PM'],
+    ['deals: "mon and tue and wed" is one day list', D('hh mon and tue 4-6') === 'Mon–Tue 4 PM–6 PM' && D('hh mon and tue and wed 4-6') === 'Mon–Wed 4 PM–6 PM'],
+    ['deals: day lists joined by "and" in two clauses', D('mon and tue 4-6, wed and thu 5-7') === 'Mon–Tue 4 PM–6 PM; Wed–Thu 5 PM–7 PM'],
+    ['deals: "except mon and tue" leaves both out', D('hh 4-6 except mon and tue') === 'Wed–Sun 4 PM–6 PM' && D('hh 3-6 except sun and mon') === 'Tue–Sat 3 PM–6 PM'],
+    ['deals: "tuesdays and wednesdays" special', D('$1 tacos tuesdays and wednesdays') === 'Tue–Wed (special, all day)'],
+    // Round 3 (M) changed this one on purpose: bare days after "and" now join the clause before
+    // (it used to give 'Fri 10 PM–2 AM; Sat (special, all day)').
+    ['deals: bare days after "and" join the timed clause before', D('late night 10pm-2am fri and sat') === 'Fri–Sat 10 PM–2 AM'],
+  );
+
+  // ----- Round 3: "and" between two timed clauses (L), bare days after "and" (M), more ways to say "not" (N) -----
+  checks.push(
+    ['deals: "except sat and sun 12-3" keeps Sunday\'s own time apart', D('hh 3-6 daily except sat and sun 12-3') === 'Sun–Fri 3 PM–6 PM; Sun 12 PM–3 PM'],
+    ['deals: "hh 4-6 mon and tue" is one window', D('hh 4-6 mon and tue') === 'Mon–Tue 4 PM–6 PM'],
+    ['deals: "3-6 on mon and wed"', D('happy hour 3-6 on mon and wed') === 'Mon, Wed 3 PM–6 PM'],
+    ['deals: "m-f, 2-5 sat and sun" is two windows', D('hh 3-6 m-f, 2-5 sat and sun') === 'Mon–Fri 3 PM–6 PM; Sat–Sun 2 PM–5 PM'],
+    ['deals: "tue thru fri and sun"', D('hh 3-6 tue thru fri and sun') === 'Tue–Fri, Sun 3 PM–6 PM'],
+    ['deals: "fri and sat" after a late-night time is on Saturday night', at('late night 10pm-2am fri and sat', '2026-10-03T23:00')?.status === 'now'],
+    ['deals: "m-f and 9-close fri and sat" is two windows', D('hh 4-6 m-f and 9-close fri and sat') === 'Mon–Fri 4 PM–6 PM; Fri–Sat 9 PM–close'],
+    ['deals: "mon and wed and fri"', D('hh 3-6 mon and wed and fri') === 'Mon, Wed, Fri 3 PM–6 PM'],
+    ['deals: "m-f and sat" adds Saturday', D('hh 4-6 m-f and sat') === 'Mon–Sat 4 PM–6 PM' && at('hh 4-6 m-f and sat', '2026-10-03T17:00')?.status === 'now'],
+    ['deals: "not available fri" / "not valid on fri"', D('hh 3-6 not available fri') === 'Sat–Thu 3 PM–6 PM' && D('hh 3-6 not valid on fri') === 'Sat–Thu 3 PM–6 PM'],
+    ['deals: "excluding fri" / "except on fridays"', D('hh 3-6 excluding fri') === 'Sat–Thu 3 PM–6 PM' && D('hh 3-6 except on fridays') === 'Sat–Thu 3 PM–6 PM'],
+    ['deals: "not available on fri or sat" / "fri and sat"', D('hh 4-6 not available on fri or sat') === 'Sun–Thu 4 PM–6 PM' && D('hh 4-6 not available fri and sat') === 'Sun–Thu 4 PM–6 PM'],
+    ['deals: "not available fri" is off on Friday', at('hh 3-6 not available fri', '2026-10-02T16:00') === null && at('hh 3-6 not available fri', '2026-10-03T16:00')?.status === 'now'],
+    ['deals: a special after "and" stays a special', D('hh 3-6 m-f and taco tuesday') === 'Mon–Fri 3 PM–6 PM; Tue (special, all day)' && D('hh 3-6 mon and tue tacos $2') === 'Mon 3 PM–6 PM; Tue (special, all day)'],
+    ['deals: "hh 4-6 and tuesdays" is unchanged (no days of its own before "and")', D('hh 4-6 and tuesdays') === 'Daily 4 PM–6 PM; Tue (special, all day)'],
+    ['deals: bare days after ";" or "," don\'t join', D('hh 4-6 m-f; sat') === 'Mon–Fri 4 PM–6 PM; Sat (special, all day)' && D('hh 4-6 m-f, sat') === 'Mon–Fri 4 PM–6 PM; Sat (special, all day)'],
+    ['deals: earlier "and" wording still read the same', D('3-6 m-f and sat 12-3') === 'Mon–Fri 3 PM–6 PM; Sat 12 PM–3 PM' && D('hh 4-6 except mon and tue') === 'Wed–Sun 4 PM–6 PM'],
+    ['deals: "no cover fri" is not a negation', D('no cover fri, hh 4-6') === 'Fri 4 PM–6 PM'],
+  );
+
+  // ----- Round 4 (Y): an excluded day with its own time after a timed clause becomes its own window -----
+  checks.push(
+    ['deals: "m-f except fri 3-5" gives Friday its own time', D('hh 4-6 m-f except fri 3-5') === 'Mon–Thu 4 PM–6 PM; Fri 3 PM–5 PM'],
+    ['deals: …and is on Friday at 3:30', at('hh 4-6 m-f except fri 3-5', '2026-10-02T15:30')?.status === 'now'],
+    ['deals: "except sunday all day"', D('hh 4-6 except sunday all day') === 'Mon–Sat 4 PM–6 PM; Sun all day' && at('hh 4-6 except sunday all day', '2026-10-04T12:00')?.status === 'now'],
+    ['deals: "daily except sun 4-6"', D('hh 3-6 daily except sun 4-6') === 'Mon–Sat 3 PM–6 PM; Sun 4 PM–6 PM'],
+    ['deals: "except fri & sat 3-5"', D('hh 4-6 except fri & sat 3-5') === 'Sun–Thu 4 PM–6 PM; Fri–Sat 3 PM–5 PM'],
+    ['deals: "except sun after 9"', D('hh 4-6 except sun after 9') === 'Mon–Sat 4 PM–6 PM; Sun 9 PM–close'],
+    ['deals: round-4 split leaves earlier wording alone', D('3-6 except sat and sun 12-3') === 'Sun–Fri 3 PM–6 PM; Sun 12 PM–3 PM'
+      && D('hh 3-6 except sundays') === 'Mon–Sat 3 PM–6 PM' && D('every day but mon 4-6') === 'Tue–Sun 4 PM–6 PM' && D('hh 3-6, closed mon') === 'Tue–Sun 3 PM–6 PM'],
+    ['deals: (Z) comma form: "4-6 daily, but fri 3-6"', D('4-6 daily, but fri 3-6') === 'Daily 4 PM–6 PM; Fri 3 PM–6 PM'],
+    ['deals: no time before the exclusion, no split ("no hh on fri 3-5")', D('no hh on fri 3-5') === 'Sat–Thu 3 PM–5 PM'],
+  );
+
+  // ----- Whole script runs, with stand-ins for the Apps Script services -----
+  // Only the restaurant tab (rich text, colors) is replaced; the "app data" and
+  // "added from app" tabs are small in-memory grids read and written by the real code.
+  const fakeSheet = (rows = []) => {
+    const grid = rows.map(r => r.slice());
+    const filled = (v) => v !== '' && v != null;
+    const lastRow = () => { for (let i = grid.length; i > 0; i--) if ((grid[i - 1] || []).some(filled)) return i; return 0; };
+    const lastCol = () => Math.max(0, ...grid.map(r => { for (let j = r.length; j > 0; j--) if (filled(r[j - 1])) return j; return 0; }));
+    const range = (r, c, nr, nc) => {
+      const values = () => Array.from({ length: nr }, (_, i) => Array.from({ length: nc }, (_, j) => { const x = (grid[r - 1 + i] || [])[c - 1 + j]; return x == null ? '' : x; }));
+      const self = {
+        setNumberFormat: () => self, setFontWeight: () => self, setBackground: () => self, setBackgrounds: () => self,
+        setValues(v) { v.forEach((row, i) => row.forEach((x, j) => { while (grid.length < r + i) grid.push([]); grid[r - 1 + i][c - 1 + j] = x; })); return self; },
+        clearContent() { for (let i = 0; i < nr; i++) for (let j = 0; j < nc; j++) if (grid[r - 1 + i]) grid[r - 1 + i][c - 1 + j] = ''; return self; },
+        getValues: values, getDisplayValues: () => values().map(row => row.map(String)),
+      };
+      return self;
+    };
+    return {
+      grid, getLastRow: lastRow, getLastColumn: lastCol, getMaxRows: () => grid.length, getMaxColumns: lastCol,
+      insertRowsAfter(_, n) { for (let i = 0; i < n; i++) grid.push([]); }, insertColumnsAfter() {},
+      getRange: range, setFrozenRows() {}, appendRow(row) { grid.splice(lastRow(), 0, row.slice()); },
+    };
+  };
+  const makeApps = ({ places = [], tab = [], respond = () => [500, ''] } = {}) => {
+    const env = { places, respond, props: { MAPS_KEY: 'k', KEY: 'secret' }, triggers: [], fetches: [], logs: [], lockFree: true, onFetch: null };
+    env.sheets = { 'app data': fakeSheet(tab.length ? [DATA_HEADERS].concat(tab) : []) };
+    // env.held counts locks taken and not yet released (0 after every run that cleaned up).
+    env.held = 0;
+    const lock = { tryLock: () => { if (env.lockFree) env.held++; return env.lockFree; }, waitLock() { env.held++; }, releaseLock() { env.held--; } };
+    const services = {
+      LockService: { getScriptLock: () => lock, getDocumentLock: () => lock },
+      ScriptApp: {
+        getProjectTriggers: () => env.triggers.slice(),
+        deleteTrigger: (t) => { env.triggers = env.triggers.filter(x => x !== t); },
+        newTrigger: (fn) => {
+          const t = { fn, getHandlerFunction: () => fn };
+          const b = { timeBased: () => b, everyDays: () => b, atHour: () => b, after: (ms) => { t.after = ms; return b; }, create: () => { env.triggers.push(t); return t; } };
+          return b;
+        },
+      },
+      PropertiesService: { getScriptProperties: () => ({
+        getProperty: (k) => (k in env.props ? env.props[k] : null), setProperty: (k, v) => { env.props[k] = String(v); }, deleteProperty: (k) => { delete env.props[k]; },
+        getProperties: () => ({ ...env.props }),
+      }) },
+      UrlFetchApp: { fetchAll: (reqs) => {
+        // Text Search sends its query in the body; Place Details asks by ID in the URL ("details:<id>").
+        const queries = reqs.map(r => (r.payload ? JSON.parse(r.payload).textQuery : 'details:' + decodeURIComponent(r.url.split('/places/')[1])));
+        env.fetches.push(queries);
+        if (env.onFetch) env.onFetch();
+        return queries.map(q => { const [code, body] = env.respond(q); return { getResponseCode: () => code, getContentText: () => body }; });
+      } },
+      SpreadsheetApp: { getActive: () => ({ getSheetByName: (n) => env.sheets[n] || null, insertSheet: (n) => (env.sheets[n] = fakeSheet()), toast() {} }) },
+      Logger: { log: (m) => env.logs.push(m) },
+      Utilities: Object.assign({}, window.Utilities, { sleep() {} }),
+      // doGet's answer comes back as its JSON text.
+      ContentService: { createTextOutput: (text) => ({ setMimeType: () => text }), MimeType: { JSON: 'json' } },
+    };
+    const names = Object.keys(services);
+    const fns = new Function('env', ...names, code + `
+      readSourcePlaces_ = () => env.places;
+      return { fillMissing, refreshStale_, quickFill_, nightlyFill, saveVisit_, addPlace_, withLatestTyping_, typingOf_, readAppData_, listLooksDamaged_, doGet, MISSING, NOT_LISTED };`)(env, ...names.map(n => services[n]));
+    return Object.assign(env, fns, {
+      grid: () => env.sheets['app data'].grid,
+      // Types into a cell of the "app data" tab, the way a person would.
+      type: (key, header, value) => { env.sheets['app data'].grid.find(r => r[0] === key)[DATA_HEADERS.indexOf(header)] = value; },
+      conts: () => env.triggers.filter(t => t.getHandlerFunction() === 'continueFill'),
+    });
+  };
+  const SP = (name, section = 'try', hood = '') => ({ ...P(name, hood), section });
+  const rec = (name, extra = {}) => ({ key: name.toLowerCase(), name, row: 9, status: 'ok', query: name, at: '2026-09-01', locs: [loc1], ...extra });
+  const tabOf = (recs, list) => dataToRows_(new Map(recs.map(r => [r.key, r])), list).rows;
+  const found = (q) => [200, JSON.stringify({ places: [g(q, 47.61)] })];
+
+  // #9: the lock is busy (say, the nightly refresh): try again in a minute instead of dropping the chain.
+  const busy = makeApps();
+  busy.triggers.push({ fn: 'continueFill', getHandlerFunction: () => 'continueFill' });
+  const oldTrigger = busy.triggers[0];
+  busy.lockFree = false;
+  busy.fillMissing();
+  checks.push(['fill: a busy lock schedules another try a minute later', busy.conts().length === 1 && busy.conts()[0] !== oldTrigger && busy.conts()[0].after === 60000]);
+
+  // #11: Google keeps answering 429: three tries a minute apart, then leave it to the nightly run.
+  const two = [SP('Alpha Diner', 'recommend'), SP('Bravo Bistro')];
+  const rate = makeApps({ places: two, respond: () => [429, ''] });
+  const scheduled = [];
+  for (let i = 0; i < 3; i++) { rate.fillMissing(); scheduled.push(rate.conts().length); }
+  const rateLog = rate.logs[rate.logs.length - 1];
+  rate.respond = found;
+  rate.fillMissing();
+  checks.push(
+    ['fill: 429 reschedules only while the streak is short', JSON.stringify(scheduled) === '[1,1,0]' && rate.props['fill:rateStreak'] === '0'],
+    ['fill: a long 429 streak says it will retry tonight', /too many requests/.test(rateLog) && /tonight/.test(rateLog)],
+    ['fill: a run that is not rate-limited resets the streak', rate.props['fill:rateStreak'] === '0' && rate.readAppData_().get('bravo bistro')?.status === 'ok'],
+  );
+
+  // #11: records Google refused (403) are probed one at a time; a refusal stops the run.
+  const refusedRecs = ['Kilo Kitchen', 'Lima Lounge', 'Mike Mart'].map(n => rec(n, { status: 'error 403', locs: [] }));
+  const refusedPlaces = [SP('Alpha Diner', 'recommend'), ...refusedRecs.map(r => SP(r.name))];
+  const refusedTab = tabOf([rec('Alpha Diner')].concat(refusedRecs), refusedPlaces);
+  const refused = makeApps({ places: refusedPlaces, tab: refusedTab, respond: () => [403, '{"error":{"message":"Billing off"}}'] });
+  refused.fillMissing();
+  const fixedBilling = makeApps({ places: refusedPlaces, tab: refusedTab, respond: found });
+  fixedBilling.fillMissing();
+  const mixed = makeApps({ places: refusedPlaces.concat(SP('November Noodles')), tab: refusedTab, respond: found });
+  mixed.fillMissing();
+  checks.push(
+    ['fill: a lasting refusal costs one lookup', refused.fetches.length === 1 && refused.fetches[0].length === 1 && refused.props['usage:2026-10:textSearch'] === '1'],
+    ['fill: a refusal is not retried every minute', refused.conts().length === 0 && /refused/.test(refused.logs[refused.logs.length - 1])],
+    ['fill: once a probe works, the rest go in a batch', JSON.stringify(fixedBilling.fetches.map(f => f.length)) === '[1,2]' && fixedBilling.readAppData_().get('mike mart')?.status === 'ok'],
+    ['fill: refused records go after new places', mixed.fetches[0][0] === 'November Noodles'],
+  );
+
+  // #4: what was typed in the tab while a run was looking places up is not reverted.
+  const typedPlaces = [SP('Alpha Diner', 'recommend'), SP('Bravo Bistro'), SP('Charlie Grill', 'try', 'fremont')];
+  const typing = makeApps({
+    places: typedPlaces,
+    tab: tabOf([rec('Alpha Diner'), rec('Bravo Bistro', { status: 'error 500', locs: [] }), rec('Charlie Grill', { status: 'check name' })], typedPlaces),
+    respond: (q) => (q === 'Charlie Grill fremont' ? [200, JSON.stringify({ places: [g('Totally Different Pho', 47.6)] })] : found(q)),
+  });
+  typing.onFetch = () => {
+    typing.type('alpha diner', 'Verdict', 'Good');
+    typing.type('alpha diner', 'Visited', '2026-10-01');
+    typing.type('alpha diner', 'Visit notes', 'typed meanwhile');
+    typing.type('bravo bistro', 'Status', 'skip');   // same search text as this run: your "skip" stands
+    typing.type('charlie grill', 'Status', 'OK');    // the run searched with new text: its result stands
+    typing.onFetch = null;
+  };
+  typing.fillMissing();
+  const afterTyping = typing.readAppData_();
+  checks.push(
+    ['fill: a visit typed during the run survives', afterTyping.get('alpha diner').verdict === 'Good' && afterTyping.get('alpha diner').visitNotes === 'typed meanwhile'],
+    ['fill: a status typed during the run survives', afterTyping.get('bravo bistro').status === 'skip'],
+    ['fill: a typed status is dropped if the run searched with new text', afterTyping.get('charlie grill').status === 'check name' && afterTyping.get('charlie grill').query === 'Charlie Grill fremont'],
+  );
+  const merged = typing.withLatestTyping_(new Map([['alpha diner', { ...rec('Alpha Diner'), verdict: '' }]]));
+  checks.push(['merge: rows only in the tab are kept, typed visit wins', merged.size === 3 && merged.get('alpha diner').verdict === 'Good']);
+
+  // Round 2 (A): only cells that changed since the run first read the tab count as typed.
+  const onePlace = [SP('Alpha Diner', 'recommend'), SP('Bravo Bistro')];
+  const typedTab = (extra = {}) => makeApps({ places: onePlace, tab: tabOf([rec('Alpha Diner', extra), rec('Bravo Bistro')], onePlace) });
+  const mergeOne = (app, before, extra) => app.withLatestTyping_(new Map([['alpha diner', { ...rec('Alpha Diner'), ...extra }]]), before).get('alpha diner');
+  const snap = (app) => app.typingOf_(app.readAppData_());
+  const retired = typedTab();
+  const typedSkip = typedTab({ status: 'error 500', locs: [] });
+  const typedSkipBefore = snap(typedSkip);
+  typedSkip.type('alpha diner', 'Status', 'skip');
+  const untouchedSkip = typedTab({ status: 'skip' });
+  const keptVerdict = typedTab({ verdict: 'Good', visited: '2026-09-01' });
+  const newVerdict = typedTab();
+  const newVerdictBefore = snap(newVerdict);
+  newVerdict.type('alpha diner', 'Verdict', 'Good');
+  const tabEdits = { deals: { was: 'HH 4-6', now: 'HH 3-6' } };
+  const memEdits = { deals: { was: 'HH 4-6', now: 'HH 5-7' } };
+  const sameEdits = typedTab({ edits: tabEdits });
+  const changedEdits = typedTab({ edits: tabEdits });
+  const changedEditsBefore = snap(changedEdits);
+  changedEdits.type('alpha diner', 'Edits (JSON)', JSON.stringify({ desc: { was: '', now: 'typed meanwhile' } }));
+  const noSnap = typedTab({ verdict: 'Good', edits: tabEdits });
+  const noSnapMerged = mergeOne(noSnap, undefined, { status: 'error 404', verdict: 'Loved', edits: memEdits });
+  checks.push(
+    ['typing: a retired place\'s "error 404" isn\'t undone by the "ok" the row already had', mergeOne(retired, snap(retired), { status: 'error 404' }).status === 'error 404'],
+    ['typing: a status typed during the run still wins', mergeOne(typedSkip, typedSkipBefore, { status: 'ok' }).status === 'skip'],
+    ['typing: an untouched "skip" doesn\'t undo the run\'s new status', mergeOne(untouchedSkip, snap(untouchedSkip), { status: 'check name' }).status === 'check name'],
+    ['typing: an untouched verdict doesn\'t undo the run\'s', mergeOne(keptVerdict, snap(keptVerdict), { verdict: 'Loved', visited: '2026-10-02' }).verdict === 'Loved'],
+    ['typing: a verdict typed during the run wins', mergeOne(newVerdict, newVerdictBefore, { verdict: '' }).verdict === 'Good'],
+    ['typing: untouched edits don\'t undo the run\'s', JSON.stringify(mergeOne(sameEdits, snap(sameEdits), { edits: memEdits }).edits) === JSON.stringify(memEdits)],
+    ['typing: edits changed during the run win', mergeOne(changedEdits, changedEditsBefore, { edits: memEdits }).edits.desc?.now === 'typed meanwhile'],
+    ['typing: without a snapshot every re-read cell counts (old behaviour)', noSnapMerged.verdict === 'Good' && JSON.stringify(noSnapMerged.edits) === JSON.stringify(tabEdits) && noSnapMerged.status === 'ok'],
+  );
+
+  // Round 2 (A), whole run: the monthly refresh marks a retired Google ID "error 404" in the tab.
+  const stale = makeApps({ places: onePlace, tab: tabOf([rec('Alpha Diner'), rec('Bravo Bistro')], onePlace),
+    respond: (q) => (q.startsWith('details:') ? [404, ''] : [500, '']) });
+  stale.onFetch = () => { stale.type('bravo bistro', 'Verdict', 'Good'); stale.onFetch = null; };
+  stale.refreshStale_(10, 0);
+  const staleRow = stale.grid().find(r => r[0] === 'alpha diner');
+  const afterStale = stale.readAppData_();
+  checks.push(
+    ['refresh: a retired ID is saved as "error 404", not reverted to "ok"', stale.fetches.length === 1 && stale.fetches[0][0].startsWith('details:') && staleRow[DATA_HEADERS.indexOf('Status')] === 'error 404'],
+    ['refresh: a visit typed during the refresh survives', afterStale.get('bravo bistro').verdict === 'Good' && afterStale.get('bravo bistro').status === 'error 404'],
+  );
+
+  // #1: adding back a place kept as "not in the list" keeps its visit and edits.
+  const listed2 = [SP('Alpha Diner', 'recommend'), SP('Bravo Bistro')];
+  const comeback = makeApps({ places: listed2, tab: tabOf([rec('Alpha Diner'), rec('Bravo Bistro'), { ...gone, edits: { deals: { was: 'HH 4-6', now: 'HH 3-6' } } }], listed2) });
+  const addResult = comeback.addPlace_({ name: 'Old Name', hood: 'fremont', loc: { id: 'id-new', name: 'Old Name', lat: 47.62, lng: -122.3 } });
+  const back = comeback.readAppData_().get('old name');
+  checks.push(
+    ['add: re-adding a kept place keeps its visit and edits', addResult.ok && back?.verdict === 'Loved' && back.visited === '2026-10-02' && back.edits.deals?.now === 'HH 3-6'],
+    ['add: …with the new Google match', back?.status === 'ok' && back.locs.length === 1 && back.locs[0].id === 'id-new' && back.row === 'added 2'],
+  );
+
+  // #3: a damaged header row stops every writer instead of erasing the visits.
+  const throws = (f) => { try { f(); return false; } catch (e) { return /damaged/.test(e.message); } };
+  const noKey = DATA_HEADERS.map(h => (h === 'key' ? 'Key ' : h));
+  const noVerdict = DATA_HEADERS.map(h => (h === 'Verdict' ? 'verdict?' : h));
+  const someRows = tabOf([visited], [P('Echo Eatery')]);
+  checks.push(
+    ['tab: a missing "key" header is an error', throws(() => rowsToData_(noKey, someRows))],
+    ['tab: a renamed visit column is an error', throws(() => rowsToData_(noVerdict, someRows)) && throws(() => rowsToData_(DATA_HEADERS.filter(h => h !== 'Visit notes'), someRows))],
+    ['tab: a header with no rows yet is fine', rowsToData_(noKey, []).size === 0],
+  );
+  const damaged = makeApps({ places: listed2, tab: tabOf([rec('Alpha Diner', { verdict: 'Loved', visited: '2026-09-01' })], listed2) });
+  damaged.grid()[0][0] = 'Key ';
+  const gridBefore = JSON.stringify(damaged.grid());
+  checks.push(['tab: saving a visit on a damaged tab writes nothing', throws(() => damaged.saveVisit_({ place: 'bravo bistro', verdict: 'Good' })) && JSON.stringify(damaged.grid()) === gridBefore]);
+
+  // #5 / #20: a verdict the script doesn't know never wipes the stored visit.
+  const lovedTab = tabOf([rec('Alpha Diner', { verdict: 'Loved', visited: '2026-09-01', visitNotes: 'great' })], listed2);
+  const unknown = makeApps({ places: listed2, tab: lovedTab });
+  const unknownGrid = JSON.stringify(unknown.grid());
+  const refusedVisit = unknown.saveVisit_({ place: 'alpha diner', verdict: 'Superb', notes: '' });
+  const missingVerdict = unknown.saveVisit_({ place: 'alpha diner', notes: '' });
+  const cleared = makeApps({ places: listed2, tab: lovedTab });
+  const clearResult = cleared.saveVisit_({ place: 'alpha diner', verdict: '' });
+  checks.push(
+    ['visit: an unknown verdict is refused without writing', refusedVisit.error === 'bad-verdict' && missingVerdict.error === 'bad-verdict' && JSON.stringify(unknown.grid()) === unknownGrid],
+    ['visit: an empty verdict still clears it', clearResult.ok && clearResult.visit === null && cleared.readAppData_().get('alpha diner').verdict === ''],
+  );
+
+  // #10: a chain's re-search that finds a different place keeps the approved locations.
+  const approved = rec('Echo Eatery', { locs: [loc1, { ...loc1, id: 'id-second' }] });
+  const unrelated = refreshFromSearch_(approved, { status: 'check name', locs: [{ ...loc1, id: 'id-unrelated', name: 'Unrelated Pho' }], at: '2026-09-30', query: 'Echo Eatery' });
+  const sameBranch = refreshFromSearch_(approved, { status: 'check name', locs: [{ ...loc1, lat: 47.7 }], at: '2026-09-30', query: 'Echo Eatery' });
+  checks.push(
+    ['chain: an unapproved place is not swapped in', unrelated.status === 'ok' && unrelated.locs.length === 2 && unrelated.locs.every(l => l.id !== 'id-unrelated') && unrelated.at === '2026-09-30'],
+    ['chain: a doubtful result matching one approved branch keeps every branch as approved', sameBranch.status === 'ok' && JSON.stringify(sameBranch.locs.map(l => l.id)) === JSON.stringify([loc1.id, 'id-second'])
+      && sameBranch.locs[0].lat === loc1.lat && sameBranch.at === '2026-09-30'],
+  );
+  const singleOk = refreshFromSearch_(rec('Golf Grocery', { visitNotes: 'kept' }), { status: 'check name', locs: [{ ...loc1, lat: 47.7 }], at: '2026-09-30', query: 'Golf Grocery' });
+  const okToOk = refreshFromSearch_(rec('Golf Grocery', { verdict: 'Loved' }), { status: 'ok', locs: [{ ...loc1, id: 'id-new', lat: 47.7 }], at: '2026-09-30', query: 'Golf Grocery' });
+  checks.push(
+    ['chain: an approved single place keeps its old location on a doubtful result', singleOk.status === 'ok' && singleOk.locs.length === 1 && singleOk.locs[0].lat === loc1.lat && singleOk.at === '2026-09-30' && singleOk.visitNotes === 'kept'],
+    ['chain: a confident new result is still taken, visit carried over', okToOk.status === 'ok' && okToOk.locs[0].id === 'id-new' && okToOk.locs[0].lat === 47.7 && okToOk.verdict === 'Loved'],
+  );
+
+  // #12: a mistyped heading (or many places vanishing at once) doesn't throw away Google data.
+  const many = Array.from({ length: 40 }, (_, i) => SP('Place ' + (i + 1), i < 30 ? 'try' : 'recommend'));
+  const manyRecs = many.map(p => rec(p.name));
+  const manyMap = () => new Map(manyRecs.map(r => [r.key, { ...r }]));
+  const h = makeApps();
+  checks.push(
+    ['list check: a missing "To Try" heading looks damaged', h.listLooksDamaged_(manyMap(), many.filter(p => p.section !== 'try'))],
+    ['list check: 12 of 40 places gone looks damaged', h.listLooksDamaged_(manyMap(), many.slice(12))],
+    ['list check: 5 of 40 places gone is an edit', !h.listLooksDamaged_(manyMap(), many.slice(5))],
+    ['list check: "not in the list" rows don\'t count', !h.listLooksDamaged_(new Map(manyRecs.map(r => [r.key, { ...r, row: h.NOT_LISTED }])), many.slice(0, 2).concat(many.slice(30, 31)))],
+  );
+  const shrunk = many.slice(12);
+  const keptAll = dataToRows_(manyMap(), shrunk, true).rows;
+  const keptBack = rowsToData_(DATA_HEADERS, keptAll);
+  const healthyAgain = rowsToData_(DATA_HEADERS, dataToRows_(keptBack, shrunk, h.listLooksDamaged_(keptBack, shrunk)).rows);
+  const missingMap = new Map(manyRecs.map((r, i) => [r.key, { ...r, row: i < 12 ? h.MISSING : 9 }]));
+  checks.push(
+    ['list check: kept rows keep their Google data', keptAll.length === 40 && keptBack.get('place 1').locs.length === 1 && keptBack.get('place 1').row === h.MISSING],
+    ['list check: a removal that stands is an edit the next time', !h.listLooksDamaged_(keptBack, shrunk) && healthyAgain.size === 28 && !healthyAgain.has('place 1')],
+    ['list check: kept "missing" rows don\'t count as gone', !h.listLooksDamaged_(missingMap, many.slice(12))],
+    ['list check: no "would recommend" section is fine', !h.listLooksDamaged_(new Map(manyRecs.slice(0, 30).map(r => [r.key, { ...r }])), many.slice(0, 30))],
+    ['list check: a "To Try" place added in the app isn\'t the heading', h.listLooksDamaged_(new Map([['kilo', rec('Kilo')]]), [{ ...SP('Kilo'), added: true }, SP('Alpha Diner', 'recommend')])],
+    ['list check: kept rows with notes stay "not in the list"', dataToRows_(new Map([['old name', gone]]), [], true).rows[0][DATA_HEADERS.indexOf('Sheet row')] === h.NOT_LISTED],
+    ['list check: a healthy list drops kept rows without notes', dataToRows_(keptBack, many.slice(1), false).rows.length === 39],
+  );
+  const typo = makeApps({ places: many, tab: tabOf(manyRecs, many) });
+  typo.places = many.filter(p => p.section !== 'try'); // the "To Try" heading is being retyped
+  typo.saveVisit_({ place: 'place 31', verdict: 'Good' });
+  const duringTypo = typo.readAppData_();
+  typo.places = many; // heading fixed
+  typo.saveVisit_({ place: 'place 32', verdict: 'Meh' });
+  const afterFix = typo.readAppData_();
+  checks.push(
+    ['list check: a visit saved during a heading typo keeps every place\'s Google data', duringTypo.size === 40 && duringTypo.get('place 1').locs.length === 1 && duringTypo.get('place 31').verdict === 'Good'],
+    ['list check: after the fix, rows are back in list order and nothing needs a lookup', afterFix.size === 40 && String(afterFix.get('place 1').row) === '9' && many.every(p => !needsLookup_(p, afterFix.get(p.key)))],
+  );
+
+  // Round 3 (H): kept rows stay for a week after the list looked damaged, not just one write.
+  const propsOf = (init = {}) => {
+    const s = { ...init };
+    return { s, getProperty: (k) => (k in s ? s[k] : null), setProperty: (k, v) => { s[k] = String(v); }, deleteProperty: (k) => { delete s[k]; } };
+  };
+  const sinceAgo = (days) => ({ 'list:damagedSince': new Date(ago(days)).toISOString() });
+  // As after the first write of a damaged list: places 1-12 kept as "missing", the rest listed.
+  const keptMissing = (extra = {}) => new Map(manyRecs.map((r, i) => [r.key, { ...r, row: i < 12 ? h.MISSING : 9, ...(i === 0 ? extra : {}) }]));
+  const damagedProps = propsOf();
+  const damagedKeep = keepAllRows_(manyMap(), many.slice(12), damagedProps, today);
+  const heldProps = propsOf(sinceAgo(2));
+  const backProps = propsOf(sinceAgo(2));
+  const expiredProps = propsOf(sinceAgo(8));
+  const expiredKeep = keepAllRows_(keptMissing(), many.slice(12), expiredProps, today);
+  const garbageProps = propsOf({ 'list:damagedSince': 'garbage' });
+  const healthyProps = propsOf();
+  const headingProps = propsOf(sinceAgo(8));
+  const notedProps = propsOf(sinceAgo(8));
+  const notedKeep = keepAllRows_(keptMissing({ verdict: 'Loved', visited: '2026-09-01' }), many.slice(12), notedProps, today);
+  const notedRows = dataToRows_(keptMissing({ verdict: 'Loved', visited: '2026-09-01' }), many.slice(12), notedKeep).rows;
+  checks.push(
+    ['hold: a damaged list keeps every row and remembers when', damagedKeep === true && damagedProps.s['list:damagedSince'] === today.toISOString()],
+    ['hold: the first damage date isn\'t moved by later damaged writes', keepAllRows_(manyMap(), many.slice(12), heldProps, today) === true && heldProps.s['list:damagedSince'] === sinceAgo(2)['list:damagedSince']],
+    ['hold: kept rows still absent within a week stay', keepAllRows_(keptMissing(), many.slice(12), heldProps, today) === true && heldProps.s['list:damagedSince'] === sinceAgo(2)['list:damagedSince']],
+    ['hold: once every kept row is back, the hold ends', keepAllRows_(keptMissing(), many, backProps, today) === false && !('list:damagedSince' in backProps.s)],
+    ['hold: after a week a removal that stands is pruned', expiredKeep === false && !('list:damagedSince' in expiredProps.s) && dataToRows_(keptMissing(), many.slice(12), expiredKeep).rows.length === 28],
+    ['hold: an unreadable date counts as expired', keepAllRows_(keptMissing(), many.slice(12), garbageProps, today) === false && !('list:damagedSince' in garbageProps.s)],
+    ['hold: a healthy list with no hold changes nothing', keepAllRows_(manyMap(), many, healthyProps, today) === false && Object.keys(healthyProps.s).length === 0],
+    // Round 4 (T) changed this on purpose: the 30 "To Try" rows are newly gone (not yet kept as
+    // "missing"), so an expired hold starts a new one dated today. It used to keep the 8-day-old date.
+    ['hold: a missing "To Try" heading after an expired hold starts a new hold', keepAllRows_(manyMap(), many.filter(p => p.section !== 'try'), headingProps, today) === true
+      && headingProps.s['list:damagedSince'] === today.toISOString() && headingProps.s['list:goneCount'] === '30'],
+    ['hold: after it expires a kept row with notes stays "not in the list"', notedKeep === false && notedRows.length === 29 && notedRows.find(r => r[0] === 'place 1')?.[DATA_HEADERS.indexOf('Sheet row')] === h.NOT_LISTED],
+  );
+  // Two writes in a row, as the nightly run does (fillMissing, then refreshStale_), with 12 places
+  // of a section other than "To Try" gone: the second write must not prune what the first kept.
+  const halves = Array.from({ length: 40 }, (_, i) => SP('Place ' + (i + 1), i < 20 ? 'try' : 'recommend'));
+  const twice = makeApps({ places: halves, tab: tabOf(halves.map(p => rec(p.name)), halves) });
+  twice.places = halves.filter((p, i) => i < 20 || i >= 32); // places 21-32 vanish
+  twice.fillMissing();
+  const afterFirst = twice.readAppData_();
+  twice.refreshStale_(40, 28);
+  const afterSecond = twice.readAppData_();
+  checks.push(
+    ['hold: the first write keeps the vanished rows with their Google data', afterFirst.size === 40 && afterFirst.get('place 21')?.row === twice.MISSING && afterFirst.get('place 21').locs.length === 1 && Boolean(twice.props['list:damagedSince'])],
+    ['hold: …and so does the next write', twice.fetches.length > 0 && afterSecond.size === 40 && afterSecond.get('place 21')?.row === twice.MISSING && afterSecond.get('place 21').locs.length === 1],
+  );
+
+  // Round 3 (H): the app is told while rows are being held.
+  const vanished = H(sinceAgo(1));
+  checks.push(
+    // Round 4 (U) reworded the note on purpose: "left the restaurant tab" replaces "vanished".
+    ['health: vanished places are flagged with the date', vanished.length === 1 && /left the restaurant tab/.test(vanished[0]) && /Oct 1/.test(vanished[0])],
+    ['health: the note goes after a week', H(sinceAgo(8)).length === 0],
+    ['health: a missing heading shows only the heading note', H(sinceAgo(1), [{ section: 'recommend' }]).length === 1 && /To Try/.test(H(sinceAgo(1), [{ section: 'recommend' }])[0]) && !/left the restaurant tab/.test(H(sinceAgo(1), [{ section: 'recommend' }])[0])],
+    ['health: an unreadable hold date is ignored', H({ 'list:damagedSince': 'garbage' }).length === 0],
+  );
+
+  // Round 3 (I): a 400 saying the API key is bad is a refusal too; other 400s are about the place.
+  const badKey400 = JSON.stringify({ error: { code: 400, status: 'INVALID_ARGUMENT', message: 'API key not valid. Please pass a valid API key.', details: [{ reason: 'API_KEY_INVALID' }] } });
+  const keyDetailsOnly = JSON.stringify({ error: { status: 'INVALID_ARGUMENT', message: 'Bad request', details: [{ '@type': 'type.googleapis.com/google.rpc.ErrorInfo', reason: 'API_KEY_INVALID' }] } });
+  const plain400 = JSON.stringify({ error: { status: 'INVALID_ARGUMENT', message: 'Invalid textQuery' } });
+  checks.push(
+    ['lookup: a bad-key 400 is stored as "error 400 (bad key)"', toRecord_(P('X'), 400, badKey400).status === 'error 400 (bad key)' && toRecord_(P('X'), 400, keyDetailsOnly).status === 'error 400 (bad key)'],
+    ['lookup: another 400 stays "error 400"', toRecord_(P('X'), 400, plain400).status === 'error 400' && toRecord_(P('X'), 400, 'not json').status === 'error 400'],
+    ['lookup: 403 is unchanged', toRecord_(P('X'), 403, '').status === 'error 403'],
+    ['lookup: "error 400 (bad key)" is looked up again', needsLookup_(P('Alpha Diner', 'capitol hill'), { ...stored, status: 'error 400 (bad key)' })],
+  );
+  const twentyFive = Array.from({ length: 25 }, (_, i) => SP('Spot ' + (i + 1)));
+  const keyFill = makeApps({ places: twentyFive, respond: () => [400, badKey400] });
+  keyFill.fillMissing();
+  const keyAfter = keyFill.readAppData_();
+  const keyAgain = makeApps({ places: twentyFive, tab: tabOf(twentyFive.map(p => rec(p.name, { status: 'error 400 (bad key)', locs: [] })), twentyFive), respond: () => [400, badKey400] });
+  keyAgain.fillMissing();
+  const otherFill = makeApps({ places: twentyFive, respond: () => [400, plain400] });
+  otherFill.fillMissing();
+  checks.push(
+    ['fill: a bad-key 400 stops after the first batch', keyFill.fetches.length === 1 && keyFill.fetches[0].length === 10 && keyFill.conts().length === 0 && /refused/.test(keyFill.logs[keyFill.logs.length - 1])],
+    ['fill: …and is stored as "error 400 (bad key)"', keyAfter.get('spot 1')?.status === 'error 400 (bad key)'],
+    ['fill: next run, bad-key places are probed one at a time', keyAgain.fetches.length === 1 && keyAgain.fetches[0].length === 1 && keyAgain.conts().length === 0],
+    ['fill: a 400 about one place doesn\'t stop the run', JSON.stringify(otherFill.fetches.map(f => f.length)) === '[10,10,5]' && otherFill.readAppData_().get('spot 25')?.status === 'error 400'],
+  );
+
+  // Round 3 (J): the monthly refresh stops at the first refused batch instead of trying every batch.
+  const stalePlaces = (n) => Array.from({ length: n }, (_, i) => SP('Place ' + (i + 1)));
+  const refreshApp = (n, respond) => {
+    const list = stalePlaces(n);
+    // The tab starts in reverse order, so a rewrite (back into list order) shows the tab was written.
+    return makeApps({ places: list, tab: tabOf(list.map(p => rec(p.name)), list.slice().reverse()), respond });
+  };
+  const ref403 = refreshApp(20, () => [403, '']);
+  ref403.refreshStale_(40, 0);
+  const ref403After = ref403.readAppData_();
+  const refKey = refreshApp(20, () => [400, badKey400]);
+  refKey.refreshStale_(40, 0);
+  const refOk = refreshApp(40, (q) => [200, JSON.stringify(g(q.replace('details:', ''), 47.7))]);
+  refOk.refreshStale_(40, 0);
+  checks.push(
+    ['refresh: a 403 stops after one batch', ref403.fetches.length === 1 && ref403.fetches[0].length === 10 && /Google refused/.test(ref403.logs[ref403.logs.length - 1])],
+    ['refresh: …the tab is still written, records unchanged', ref403.grid()[1][0] === 'place 1' && ref403After.size === 20 && [...ref403After.values()].every(r => r.at === '2026-09-01' && r.status === 'ok' && r.locs.length === 1)],
+    ['refresh: a bad-key 400 stops after one batch', refKey.fetches.length === 1],
+    ['refresh: when Google answers, every batch runs', refOk.fetches.length === 4 && !/refused/.test(refOk.logs[refOk.logs.length - 1])],
+  );
+
+  // Round 3 (K): the list tells the app which verdicts this script accepts.
+  const served = makeApps({ places: [SP('Alpha Diner', 'recommend'), SP('Bravo Bistro')] });
+  const listAnswer = JSON.parse(served.doGet({ parameter: { key: 'secret' } }));
+  const wrongKey = JSON.parse(served.doGet({ parameter: { key: 'wrong' } }));
+  checks.push(
+    ['list: verdicts are sent with the list', JSON.stringify(listAnswer.verdicts) === '["Loved","Good","Meh","Bad"]'],
+    ['list: the other fields are still there', Array.isArray(listAnswer.places) && listAnswer.places.length === 2 && Array.isArray(listAnswer.health) && 'mapsKey' in listAnswer && typeof listAnswer.loadedAt === 'string'],
+    ['list: a wrong key gets only the error', JSON.stringify(wrongKey) === '{"error":"bad-key"}'],
+  );
+
+  // Round 4 (P): "Look up now" from the phone handles refusals and the monthly cap like fillMissing.
+  const USAGE = 'usage:2026-10:textSearch';
+  const sizes = (app) => JSON.stringify(app.fetches.map(f => f.length));
+  const qfRefused = makeApps({ places: refusedPlaces, tab: refusedTab, respond: () => [403, '{"error":{"message":"Billing off"}}'] });
+  const qfRefusedAnswer = qfRefused.quickFill_(20);
+  const qfMixed = makeApps({ places: refusedPlaces.concat(Array.from({ length: 12 }, (_, i) => SP('New ' + (i + 1)))), tab: refusedTab, respond: found });
+  const qfMixedAnswer = qfMixed.quickFill_(20);
+  const allRefusedTab = tabOf(twentyFive.map(p => rec(p.name, { status: 'error 403', locs: [] })), twentyFive);
+  const qfProbeOk = makeApps({ places: twentyFive, tab: allRefusedTab, respond: found });
+  const qfProbeOkAnswer = qfProbeOk.quickFill_(20);
+  const qfKey = makeApps({ places: twentyFive, respond: () => [400, badKey400] });
+  const qfKeyAnswer = qfKey.quickFill_(20);
+  const qfCapped = makeApps({ places: twentyFive, tab: tabOf([rec('Spot 1', { status: 'error 500', locs: [] })], twentyFive), respond: found });
+  qfCapped.props[USAGE] = '900';
+  const qfCappedGrid = JSON.stringify(qfCapped.grid());
+  const qfCappedAnswer = qfCapped.quickFill_(20);
+  const qfPartCap = makeApps({ places: twentyFive, respond: found });
+  qfPartCap.props[USAGE] = '885';
+  const qfPartCapAnswer = qfPartCap.quickFill_(20);
+  const qfNormal = makeApps({ places: twentyFive, respond: found });
+  const qfNormalAnswer = qfNormal.quickFill_(20);
+  checks.push(
+    ['look up now: a lasting refusal costs one probe', sizes(qfRefused) === '[1]' && qfRefused.props[USAGE] === '1'
+      && JSON.stringify(qfRefusedAnswer) === '{"error":"refused","looked":1}'],
+    ['look up now: …writes what it got and schedules nothing', qfRefused.readAppData_().get('kilo kitchen').at === '2026-09-30' && qfRefused.conts().length === 0 && qfRefused.held === 0],
+    ['look up now: refused places go after new ones, new ones in a batch of 10', sizes(qfMixed) === '[10,5]'
+      && JSON.stringify(qfMixed.fetches.flat().slice(-3)) === '["Kilo Kitchen","Lima Lounge","Mike Mart"]' && qfMixedAnswer.ok && qfMixedAnswer.looked === 15],
+    ['look up now: once the probe works, the rest go in batches', sizes(qfProbeOk) === '[1,10,9]'
+      && JSON.stringify(qfProbeOkAnswer) === '{"ok":true,"looked":20,"remaining":5}' && qfProbeOk.conts().length === 1],
+    ['look up now: a bad-key 400 stops after the first batch', sizes(qfKey) === '[10]' && JSON.stringify(qfKeyAnswer) === '{"error":"refused","looked":10}'
+      && qfKey.readAppData_().get('spot 1')?.status === 'error 400 (bad key)' && qfKey.conts().length === 0],
+    ['look up now: at the cap, nothing is fetched or written', JSON.stringify(qfCappedAnswer) === '{"error":"monthly-limit","looked":0}'
+      && qfCapped.fetches.length === 0 && JSON.stringify(qfCapped.grid()) === qfCappedGrid && qfCapped.held === 0],
+    ['look up now: the cap is charged a batch at a time; what was looked up is kept', JSON.stringify(qfPartCapAnswer) === '{"error":"monthly-limit","looked":10}'
+      && sizes(qfPartCap) === '[10]' && qfPartCap.props[USAGE] === '895' && qfPartCap.readAppData_().get('spot 1')?.status === 'ok' && !qfPartCap.readAppData_().has('spot 11') && qfPartCap.conts().length === 0],
+    ['look up now: a normal run still carries on in the background', JSON.stringify(qfNormalAnswer) === '{"ok":true,"looked":20,"remaining":5}'
+      && sizes(qfNormal) === '[10,10]' && qfNormal.conts().length === 1 && qfNormal.props[USAGE] === '20'],
+  );
+
+  // Round 4 (Q): fillMissing says why it stopped; the nightly run skips the refresh after a refusal.
+  const staleOk = [rec('Stale One', { locs: [{ ...loc1, id: 'id-stale-1' }] }), rec('Stale Two', { locs: [{ ...loc1, id: 'id-stale-2' }] })];
+  const nightApp = (extraPlaces, extraRecs, respond) => {
+    const list = staleOk.map(r => SP(r.name)).concat(extraPlaces);
+    return makeApps({ places: list, tab: tabOf(staleOk.concat(extraRecs), list), respond });
+  };
+  const detailsOk = (q) => (q.startsWith('details:') ? [200, JSON.stringify(g('Stale', 47.7))] : found(q));
+  const refusing = (q) => (q.startsWith('details:') ? [200, JSON.stringify(g('Stale', 47.7))] : [403, '']);
+  const refusedRecs2 = refusedRecs.map(r => ({ ...r }));
+  const nightRefused = nightApp(refusedRecs2.map(r => SP(r.name)), refusedRecs2, refusing);
+  nightRefused.nightlyFill();
+  const fmRefused = nightApp(refusedRecs2.map(r => SP(r.name)), refusedRecs2, refusing).fillMissing();
+  const nightDone = nightApp([], [], detailsOk);
+  const fmDone = nightApp([], [], detailsOk).fillMissing();
+  nightDone.nightlyFill();
+  const fifteen = Array.from({ length: 15 }, (_, i) => SP('Fresh ' + (i + 1)));
+  const nightTime = nightApp(fifteen, [], detailsOk);
+  const realNow = Date.now;
+  nightTime.onFetch = () => { Date.now = () => realNow() + 10 * 60 * 1000; nightTime.onFetch = null; }; // the run's budget runs out
+  try { nightTime.nightlyFill(); } finally { Date.now = realNow; }
+  const detailsFetched = (app) => app.fetches.some(f => f.some(q => q.startsWith('details:')));
+  checks.push(
+    ['nightly: fillMissing says it was refused', fmRefused === 'refused' && fmDone === ''],
+    ['nightly: after a refusal the refresh is skipped', nightRefused.fetches.length === 1 && !detailsFetched(nightRefused) && !nightRefused.props['usage:2026-10:placeDetails']
+      && JSON.parse(nightRefused.props['health:nightly']).ok === true],
+    ['nightly: nothing to look up, the refresh still runs', detailsFetched(nightDone) && nightDone.props['usage:2026-10:placeDetails'] === '2'],
+    ['nightly: out of time, the refresh still runs', nightTime.fetches[0].length === 10 && !nightTime.fetches[0][0].startsWith('details:') && detailsFetched(nightTime) && nightTime.conts().length === 1],
+    ['nightly: a busy lock returns nothing, so the refresh would still be tried', busy.fillMissing() === undefined],
+  );
+
+  // Round 4 (R): a re-read that throws still releases the lock, and writes nothing.
+  const breakMid = makeApps({ places: listed2, tab: tabOf([rec('Alpha Diner', { verdict: 'Loved', visited: '2026-09-01' })], listed2), respond: found });
+  const breakRowsBefore = JSON.stringify(breakMid.grid().slice(1));
+  breakMid.onFetch = () => { breakMid.grid()[0][0] = 'Key '; breakMid.onFetch = null; };
+  let breakErr = null;
+  try { breakMid.fillMissing(); } catch (e) { breakErr = e; }
+  checks.push(
+    ['fill: a header damaged mid-run throws, as before', Boolean(breakErr) && /damaged/.test(breakErr.message) && breakMid.fetches.length === 1],
+    ['fill: …the lock is still released', breakMid.held === 0],
+    ['fill: …and the paid lookups are not written over the damaged tab', JSON.stringify(breakMid.grid().slice(1)) === breakRowsBefore],
+  );
+
+  // Round 4 (S): a missing "data (JSON)" or "Edits (JSON)" column is damage, not an older layout.
+  const throwsWith = (f, re) => { try { f(); return false; } catch (e) { return re.test(e.message); } };
+  const noJson = DATA_HEADERS.filter(h => h !== 'data (JSON)');
+  const editsAt = DATA_HEADERS.indexOf('Edits (JSON)');
+  const preEditsHeader = DATA_HEADERS.filter(h => h !== 'Edits (JSON)').concat(['', '']);
+  const preEditsRows = someRows.map(r => r.filter((_, i) => i !== editsAt).concat(['', '']));
+  const preEdits = rowsToData_(preEditsHeader, preEditsRows).get('echo eatery');
+  checks.push(
+    ['tab: no "data (JSON)" column with rows is an error', throwsWith(() => rowsToData_(noJson, someRows), /data \(JSON\)/)
+      && throwsWith(() => rowsToData_(OLD_HEADER.slice(0, -1), [oldRow.slice(0, -1)]), /data \(JSON\)/)],
+    ['tab: …with no rows it is fine', rowsToData_(noJson, []).size === 0],
+    ['tab: the layout from before "Edits (JSON)" still reads', preEditsHeader.length === 18 && Boolean(preEdits) && preEdits.verdict === 'Loved' && JSON.stringify(preEdits.edits) === '{}' && preEdits.locs.length === 1],
+    ['tab: a renamed or cleared "Edits (JSON)" is an error', throwsWith(() => rowsToData_(DATA_HEADERS.map(h => (h === 'Edits (JSON)' ? 'Edits' : h)), someRows), /Edits \(JSON\)/)
+      && throwsWith(() => rowsToData_(DATA_HEADERS.map(h => (h === 'Edits (JSON)' ? '' : h)), someRows), /Edits \(JSON\)/)],
+  );
+
+  // Round 4 (T): the week's hold applies to every kind of damage, and restarts only when more places leave.
+  const noTry = many.filter(p => p.section !== 'try');
+  const tryMissing = () => new Map(manyRecs.map((r, i) => [r.key, { ...r, row: i < 30 ? h.MISSING : 9 }]));
+  const staleHoldProps = propsOf(sinceAgo(8));
+  const staleHold1 = keepAllRows_(tryMissing(), noTry, staleHoldProps, today);
+  const staleHold2 = keepAllRows_(tryMissing(), noTry, staleHoldProps, today);
+  const moreGoneProps = propsOf(sinceAgo(8));
+  const moreGone = keepAllRows_(keptMissing(), many.slice(24), moreGoneProps, today);
+  const endProps = propsOf({ ...sinceAgo(2), 'list:goneCount': '12' });
+  const nightsProps = propsOf();
+  const night1 = keepAllRows_(manyMap(), noTry, nightsProps, today);
+  const night1Since = nightsProps.s['list:damagedSince'];
+  const laterNights = [1, 2, 3, 4, 5].map(n => keepAllRows_(tryMissing(), noTry, nightsProps, new Date(today.getTime() + n * 86400000)));
+  const night8 = keepAllRows_(tryMissing(), noTry, nightsProps, new Date(today.getTime() + 7 * 86400000));
+  checks.push(
+    ['hold: an emptied "To Try" with an expired hold stops keeping rows', staleHold1 === false && staleHoldProps.s['list:damagedSince'] === sinceAgo(8)['list:damagedSince']
+      && dataToRows_(tryMissing(), noTry, staleHold1).rows.length === 10],
+    ['hold: …and doesn\'t restart the next night', staleHold2 === false && staleHoldProps.s['list:damagedSince'] === sinceAgo(8)['list:damagedSince']],
+    ['hold: an expired hold restarts when more places leave', moreGone === true && moreGoneProps.s['list:damagedSince'] === today.toISOString() && moreGoneProps.s['list:goneCount'] === '12'],
+    ['hold: the first damage remembers how many places left', damagedProps.s['list:goneCount'] === '12'],
+    ['hold: a healthy list ends the hold and forgets both', keepAllRows_(keptMissing(), many, endProps, today) === false && Object.keys(endProps.s).length === 0],
+    ['hold: a heading broken for several nights is kept all week', night1 === true && laterNights.every(x => x === true) && nightsProps.s['list:damagedSince'] === night1Since && night1Since === today.toISOString()],
+    ['hold: …and not after the week', night8 === false && nightsProps.s['list:damagedSince'] === night1Since],
+  );
+
+  // Round 4 (U): the note says how many places left and until when their data is kept.
+  const fmtDate = window.Utilities.formatDate;
+  window.Utilities.formatDate = (d, tz, fmt) => (fmt === 'MMM d' ? d.toISOString().slice(0, 10) : fmtDate(d, tz, fmt));
+  let counted, uncounted, overdue;
+  try {
+    counted = H({ ...sinceAgo(1), 'list:goneCount': '12' });
+    uncounted = H(sinceAgo(1));
+    overdue = H({ ...sinceAgo(8), 'list:goneCount': '12' });
+  } finally { window.Utilities.formatDate = fmtDate; }
+  checks.push(
+    ['health: the note counts the places and says when they left', counted.length === 1 && counted[0].startsWith('12 places left the restaurant tab on 2026-10-01')],
+    ['health: …until when their data is kept, and that removing them is fine', /kept until 2026-10-08/.test(counted[0]) && /nothing to do/.test(counted[0])],
+    ['health: without a count it says "Many places"', uncounted.length === 1 && uncounted[0].startsWith('Many places left the restaurant tab')],
+    ['health: no note after the week', overdue.length === 0],
+  );
+
+  // ----- The app (index.html): the few parts that are plain functions -----
+  const appSrc = await (await fetch('../index.html')).text();
+  const fnSrc = (name) => {
+    const start = appSrc.indexOf(`function ${name}(`);
+    let i = appSrc.indexOf('{', start), depth = 0;
+    do { if (appSrc[i] === '{') depth++; else if (appSrc[i] === '}') depth--; i++; } while (depth);
+    return appSrc.slice(start, i);
+  };
+  const constSrc = (name) => new RegExp(`const ${name} = [^;]+;`).exec(appSrc)[0];
+  const nearest = new Function([constSrc('WEEK'), constSrc('toMin'), constSrc('OPENS_SOON'), fnSrc('openInfo'), fnSrc('miles'), fnSrc('nearest'), 'return nearest;'].join('\n'))();
+  // Friday 9:30 PM. The closer branch closed at 9; the farther one is open till midnight.
+  const fri930 = new Date('2026-10-02T21:30');
+  const here0 = { lat: 47.6, lng: -122.3 };
+  const closedNear = { id: 'near', lat: 47.601, lng: -122.3, hours: [[5, 1100, 5, 2100]] };
+  const openFar = { id: 'far', lat: 47.606, lng: -122.3, hours: [[5, 1100, 6, 0]] };
+  const closedFar = { id: 'far2', lat: 47.606, lng: -122.3, hours: [[5, 1100, 5, 2000]] };
+  const unknownFar = { id: 'far3', lat: 47.606, lng: -122.3, hours: [] };
+  checks.push(
+    ['app: a chain uses its closest open branch', nearest({ locs: [closedNear, openFar] }, here0, fri930).loc.id === 'far'],
+    ['app: …a branch with unknown hours counts as maybe open', nearest({ locs: [closedNear, unknownFar] }, here0, fri930).loc.id === 'far3'],
+    ['app: …and the closest if none is open', nearest({ locs: [closedFar, closedNear] }, here0, fri930).loc.id === 'near'],
+    ['app: …and the closest when both are open', nearest({ locs: [openFar, { ...closedNear, hours: [[5, 1100, 6, 100]] }] }, here0, fri930).loc.id === 'near'],
+  );
+
+  // Round 2 (F): a saved travel time counts only for the branch it was measured to.
+  const cachedTime = new Function(fnSrc('cachedTime') + '\nreturn cachedTime;')();
+  const trip = new Function(fnSrc('trip') + '\nreturn trip;')();
+  const locA = { lat: 47.61, lng: -122.33 }, locB = { lat: 47.65, lng: -122.3 }, locC = { lat: 47.62, lng: -122.31 }, locD = { lat: 47.63, lng: -122.32 };
+  const row = (key, loc) => ({ p: { key }, near: { loc } });
+  checks.push(
+    ['times: a time saved for this branch is used', cachedTime({ byKey: { k: { walk: 5, transit: 4, to: { ...locA } } } }, row('k', locA))?.walk === 5],
+    ['times: a time saved for another branch is not', cachedTime({ byKey: { k: { walk: 5, transit: 4, to: { ...locA } } } }, row('k', locB)) === undefined],
+    ['times: a time saved before branches were recorded is stale', cachedTime({ byKey: { k: { walk: 5, transit: 4 } } }, row('k', locA)) === undefined],
+    ['times: no saved time', cachedTime({ byKey: {} }, row('k', locA)) === undefined],
+    ['times: a failed lookup for this branch waits for Refresh', cachedTime({ byKey: { k: { failed: true, to: { ...locA } } } }, row('k', locA))?.failed === true && trip({ failed: true, to: locA }) === null],
+  );
+  const timesApp = (byKey, answer) => {
+    const env = { calls: [], saved: {}, answer, state: { here: { lat: 47.6, lng: -122.3 }, times: { origin: { lat: 47.6, lng: -122.3 }, at: 0, byKey }, timesLoading: false, timesError: '', offline: false } };
+    env.fetchTimes = new Function('env', `const state = env.state; const CONFIG_KEY = 'cfg', TIMES_KEY = 'times';
+      const loadJSON = () => ({ url: 'u', key: 'k' }); const timesFor = () => state.times; const updateStatus = () => {}; const render = () => {};
+      const saveJSON = (k, v) => { env.saved[k] = JSON.stringify(v); };
+      const callScript = async (cfg, extra) => { env.calls.push(extra); return env.answer(); };
+      ${fnSrc('cachedTime')}
+      async ${fnSrc('fetchTimes')}
+      return fetchTimes;`)(env);
+    return env;
+  };
+  const llOf = (l) => `${l.lat.toFixed(5)},${l.lng.toFixed(5)}`;
+  const toParam = (extra) => (/&to=([^&]*)/.exec(extra) || [])[1];
+  const fourRows = [row('a', locA), row('b', locB), row('c', locC), row('d', locD)];
+  const fourSaved = () => ({ a: { walk: 5, transit: 4, to: { ...locA } }, b: { walk: 7, transit: 6, to: { ...locA } }, c: { walk: 9, transit: 8 } });
+  const okTimes = timesApp(fourSaved(), () => ({ walk: [1, 2, 3], transit: [4, 5, 6] }));
+  await okTimes.fetchTimes(fourRows);
+  const savedTimes = JSON.parse(okTimes.saved.times || '{"byKey":{}}');
+  const failTimes = timesApp(fourSaved(), () => { throw new Error('no connection'); });
+  await failTimes.fetchTimes(fourRows);
+  const failed = failTimes.state.times.byKey;
+  checks.push(
+    ['times: only rows without a time for their branch are asked for, in order', okTimes.calls.length === 1 && toParam(okTimes.calls[0]) === [locB, locC, locD].map(llOf).join('|')],
+    ['times: each new time records its branch', okTimes.state.times.byKey.a.walk === 5 && ['b', 'c', 'd'].every((k, i) => JSON.stringify(okTimes.state.times.byKey[k].to) === JSON.stringify([locB, locC, locD][i])) && okTimes.state.times.byKey.b.walk === 1],
+    ['times: the saved copy keeps the branch and still matches', fourRows.every(x => cachedTime(savedTimes, x)) && savedTimes.byKey.d.transit === 6],
+    ['times: a failed lookup records its branch too', failTimes.state.timesError === 'no connection' && ['b', 'c', 'd'].every((k, i) => failed[k].failed && JSON.stringify(failed[k].to) === JSON.stringify([locB, locC, locD][i])) && failed.a.walk === 5],
+  );
+  // A chain: the time was saved to the closer branch, which has closed by 9:30 PM; the open one is farther.
+  const chainRow = { p: { key: 'chain' }, near: nearest({ locs: [closedNear, openFar] }, here0, fri930) };
+  const chainTimes = timesApp({ chain: { walk: 3, transit: 3, to: { lat: closedNear.lat, lng: closedNear.lng } } }, () => ({ walk: [12], transit: [9] }));
+  const chainTripBefore = trip(cachedTime(chainTimes.state.times, chainRow));
+  await chainTimes.fetchTimes([chainRow]);
+  checks.push(
+    ['times: the card shows no time measured to the other branch', /x\.trip = [^;]*trip\(cachedTime\(state\.times, x\)\)/.test(fnSrc('render')) && chainRow.near.loc.id === 'far' && chainTripBefore === null],
+    ['times: …and asks again for the open branch', toParam(chainTimes.calls[0] || '') === llOf(openFar) && trip(cachedTime(chainTimes.state.times, chainRow))?.min === 9],
+  );
+
+  // Round 2 (G): an old script that drops the verdict leaves the visit dialog open with what was typed.
+  const visitApp = (answer) => {
+    const els = { 'visit-save': {}, 'visit-remove': {}, 'visit-error': { hidden: true, textContent: '' }, 'visit-deals': { value: '$5 drafts' }, 'visit-notes': { value: 'my notes' },
+      visit: { open: true, close() { this.open = false; } } };
+    const env = { els, remembered: [], renders: 0, visiting: { key: 'alpha diner', visit: { verdict: 'Good', notes: 'old' } } };
+    env.saveVisit = new Function('env', `const $ = (id) => env.els[id]; const CONFIG_KEY = 'cfg'; const visiting = env.visiting;
+      const loadJSON = () => ({}); const postScript = async () => env.answer; const rememberSave = (...a) => env.remembered.push(a); const render = () => { env.renders++; };
+      async ${fnSrc('saveVisit')}
+      return saveVisit;`)(env);
+    env.answer = answer;
+    return env;
+  };
+  // Round 3 (K) changed these on purpose: the dialog still stays open with what was typed, but the
+  // card now shows what the Sheet really has (visiting.visit and rememberSave follow the answer), and
+  // the message is new. It used to keep the old visit on screen and remember nothing.
+  const OUTDATED = "Your visit couldn't be saved: the Sheet's script needs updating first. Your notes are still here.";
+  const stayedOpen = (v) => v.els['visit-error'].textContent === OUTDATED && !v.els['visit-error'].hidden && v.els.visit.open
+    && v.els['visit-notes'].value === 'my notes' && v.els['visit-deals'].value === '$5 drafts' && v.renders === 1;
+  const oldNull = visitApp({ visit: null });
+  await oldNull.saveVisit('Loved');
+  const oldOther = visitApp({ visit: { verdict: 'Good' } });
+  await oldOther.saveVisit('Loved');
+  const newScript = visitApp({ visit: { verdict: 'Loved', notes: 'my notes' } });
+  await newScript.saveVisit('Loved');
+  const removed = visitApp({ visit: null });
+  await removed.saveVisit('');
+  checks.push(
+    ['visit: an old script answering no visit leaves the dialog open, notes kept', stayedOpen(oldNull)],
+    ['visit: …and the card shows the visit was erased', oldNull.visiting.visit === null && JSON.stringify(oldNull.remembered) === JSON.stringify([['alpha diner', { visit: null }]]) && oldNull.els['visit-remove'].hidden === true],
+    ['visit: an old script answering another verdict leaves the dialog open, notes kept', stayedOpen(oldOther)],
+    ['visit: …and the card shows the verdict the Sheet kept', oldOther.visiting.visit.verdict === 'Good' && JSON.stringify(oldOther.remembered) === JSON.stringify([['alpha diner', { visit: { verdict: 'Good' } }]]) && oldOther.els['visit-remove'].hidden === false],
+    ['visit: a saved verdict closes the dialog', !newScript.els.visit.open && newScript.visiting.visit.verdict === 'Loved' && newScript.els['visit-error'].hidden && newScript.remembered.length === 1],
+    ['visit: removing a visit is not an "out of date" error', !removed.els.visit.open && removed.visiting.visit === null && removed.els['visit-error'].hidden],
+  );
+
+  // Round 3 (K): the visit dialog offers only the verdicts the Sheet's script accepts.
+  const verdictApp = (list) => {
+    const buttons = ['Loved', 'Good', 'Meh', 'Bad'].map(v => ({ dataset: { verdict: v }, hidden: false, setAttribute(k, x) { this[k] = String(x); } }));
+    const els = { controls: {}, 'visit-title': {}, 'visit-deals': {}, 'visit-notes': {}, 'visit-error': {}, 'visit-remove': {}, visit: { showModal() { this.open = true; } } };
+    const env = { buttons, els, state: { places: [] } };
+    const fns = new Function('env', `const $ = (id) => env.els[id]; const state = env.state; const recentSaves = {}; const PAGE = 20;
+      const readDeals = () => {}; const fillTagOptions = () => {}; const updatePlanUI = () => {};
+      const document = { querySelectorAll: (sel) => (sel === '[data-verdict]' ? env.buttons : []) };
+      let visiting = null;
+      ${fnSrc('setVerdict')}
+      ${fnSrc('useList')}
+      ${fnSrc('openVisit')}
+      return { useList, openVisit };`)(env);
+    fns.useList(list);
+    fns.openVisit({ key: 'alpha diner', name: 'Alpha Diner', visit: { verdict: 'Good' } });
+    env.hiddenOnes = buttons.filter(b => b.hidden).map(b => b.dataset.verdict).join(',');
+    return env;
+  };
+  const withBad = verdictApp({ places: [], verdicts: ['Loved', 'Good', 'Meh', 'Bad'] });
+  const oldList = verdictApp({ places: [] });
+  const threeOnly = verdictApp({ places: [], verdicts: ['Loved', 'Good', 'Meh'] });
+  const notArray = verdictApp({ places: [], verdicts: 'Bad' });
+  checks.push(
+    ['verdicts: a script that sends Bad shows Bad', withBad.state.verdicts.includes('Bad') && withBad.hiddenOnes === '' && withBad.els.visit.open],
+    // The v0.32 script sends no list but takes Bad; older scripts are caught by the check after saving.
+    ['verdicts: a script that sends no list (v0.32) still offers Bad', JSON.stringify(oldList.state.verdicts) === '["Loved","Good","Meh","Bad"]' && oldList.hiddenOnes === ''],
+    ['verdicts: only the ones not sent are hidden', threeOnly.hiddenOnes === 'Bad'],
+    ['verdicts: a list that isn\'t an array counts as none sent', JSON.stringify(notArray.state.verdicts) === '["Loved","Good","Meh","Bad"]' && notArray.hiddenOnes === ''],
+    ['verdicts: the stored verdict is still pressed', withBad.buttons.find(b => b.dataset.verdict === 'Good')['aria-pressed'] === 'true'],
+  );
+
+  // Round 3 (K): the local fake script (tools/dev_server.py) sends the verdicts with the list only.
+  const devSrc = await (await fetch('../tools/dev_server.py')).text();
+  const devList = devSrc.slice(devSrc.indexOf('mock_exec.json'), devSrc.indexOf('self.send_json(body)'));
+  checks.push(['dev server: the list answer has the verdicts, a bad key doesn\'t',
+    /body\["verdicts"\] = \["Loved", "Good", "Meh", "Bad"\]/.test(devList) && /body = \{"error": "bad-key"\}\s/.test(devSrc) && devSrc.indexOf('mock_exec.json') > devSrc.indexOf('"bad-key"')]);
+
+  const cssRule = (sel) => (new RegExp(`\\${sel}\\s*\\{([^}]*)\\}`).exec(appSrc) || [])[1] || '';
+  checks.push(
+    ['app: long text in a card wraps', /overflow-wrap:\s*anywhere/.test(cssRule('.place p'))],
+    ['app: a long name wraps instead of pushing the distance off-screen', /min-width:\s*0/.test(cssRule('.place h2')) && /overflow-wrap:\s*anywhere/.test(cssRule('.place h2'))],
+  );
+
+  // Round 4 (V): the app explains the new error codes.
+  const scriptAnswer = new Function('async ' + fnSrc('scriptAnswer') + '\nreturn scriptAnswer;')();
+  const answerError = async (data) => { try { await scriptAnswer(Promise.resolve({ json: async () => data })); return null; } catch (e) { return e; } };
+  const badVerdictErr = await answerError({ error: 'bad-verdict' });
+  const refusedErr = await answerError({ error: 'refused' });
+  checks.push(
+    ['app: "bad-verdict" has its own message', badVerdictErr?.message === "This rating isn't supported by the Sheet's script yet." && badVerdictErr.code === 'bad-verdict'],
+    ['app: "refused" has its own message', refusedErr?.message === "Google refused the lookup — check billing and the Maps API key in the Sheet's setup." && refusedErr.code === 'refused'],
+  );
+
+  // Round 4 (W): "pick a rating" names only the verdicts the Sheet's script accepts.
+  const submitSrc = (() => {
+    const start = appSrc.indexOf('$("visit-form").addEventListener("submit"');
+    let i = appSrc.indexOf('{', start), depth = 0;
+    const from = i;
+    do { if (appSrc[i] === '{') depth++; else if (appSrc[i] === '}') depth--; i++; } while (depth);
+    return appSrc.slice(from, i);
+  })();
+  const pickHint = (verdicts) => {
+    const env = { els: { 'visit-error': { hidden: true, textContent: '' } }, state: verdicts === undefined ? {} : { verdicts }, saved: [] };
+    const submit = new Function('env', `const $ = (id) => env.els[id]; const state = env.state;
+      const chosenVerdict = () => ''; const saveVisit = (v) => env.saved.push(v);
+      return (e) => ${submitSrc};`)(env);
+    submit({ preventDefault() {} });
+    return env.saved.length || env.els['visit-error'].hidden ? null : env.els['visit-error'].textContent;
+  };
+  checks.push(
+    ['visit: the hint lists three verdicts', pickHint(['Loved', 'Good', 'Meh']) === 'Pick Loved, Good, or Meh first.'],
+    ['visit: …or four', pickHint(['Loved', 'Good', 'Meh', 'Bad']) === 'Pick Loved, Good, Meh, or Bad first.'],
+    ['visit: …two, one, or none', pickHint(['Loved', 'Good']) === 'Pick Loved or Good first.' && pickHint(['Loved']) === 'Pick Loved first.'
+      && pickHint([]) === 'Pick a rating first.' && pickHint(undefined) === 'Pick a rating first.'],
+  );
+
+  // Round 4 (X): the local fake script refuses a verdict it doesn't know, like Code.gs; only "" clears.
+  const devVisit = devSrc.slice(devSrc.indexOf('elif req.get("action") != "visit":'), devSrc.indexOf('self.send_json(body)', devSrc.indexOf('elif req.get("action") != "visit":')));
+  const busyAt = devVisit.indexOf('"unplaced bakery"'), badAt = devVisit.indexOf('{"error": "bad-verdict"}'), elseAt = devVisit.indexOf('else:');
+  checks.push(
+    ['dev server: an unknown or missing verdict is refused before the visit is touched', badAt > 0 && badAt < elseAt
+      && /elif req\.get\("verdict"\) != "" and req\.get\("verdict"\) not in \("Loved", "Good", "Meh", "Bad"\):\s*\n\s*body = \{"error": "bad-verdict"\}/.test(devVisit)],
+    ['dev server: "unplaced bakery" is still "busy" whatever the verdict', busyAt > 0 && busyAt < badAt],
+    ['dev server: only "" clears the visit; a known verdict keeps the first date', /if req\["verdict"\]:\s*\n\s*first = VISITS\.get\(req\["place"\], \{\}\)\.get\("date", "2026-10-02"\)/.test(devVisit)
+      && /else:\s*\n\s*VISITS\.pop\(req\["place"\], None\)/.test(devVisit)],
   );
 
   const ul = document.getElementById('checks');
