@@ -126,7 +126,7 @@ class Handler(SimpleHTTPRequestHandler):
         elif req.get("place") == "unplaced bakery":
             body = {"error": "busy"}  # lets the app's "Sheet is busy" message be tested
         else:
-            if req.get("verdict") in ("Loved", "Good", "Meh"):
+            if req.get("verdict") in ("Loved", "Good", "Meh", "Bad"):
                 first = VISITS.get(req["place"], {}).get("date", "2026-10-02")
                 VISITS[req["place"]] = {"date": first, "verdict": req["verdict"],
                                         "deals": req.get("deals", "").strip(), "notes": req.get("notes", "").strip()}

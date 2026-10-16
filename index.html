@@ -102,6 +102,7 @@
     .chip.fav { background: var(--fav-bg); color: var(--fav); }
     .chip.warn { background: var(--chip); color: var(--error); }
     .chip.visited { background: var(--fav-bg); color: var(--fav); }
+    .chip.visited.bad { background: var(--chip); color: var(--error); }
     .candidate {
       display: block; width: 100%; text-align: left; margin-top: 8px; padding: 10px 12px; font-size: .95rem; font-weight: 400;
       border-radius: 10px; background: var(--bg); color: var(--text); border: 1px solid var(--border);
@@ -232,7 +233,7 @@
   <button id="more" hidden>Show more</button>
 
   <footer>
-    v0.31 · <a href="help.html">Help</a> · <a href="colors.html">Colors</a><span id="reconnect" hidden> · <button class="link" id="share">Share setup link</button> · <button class="link" id="reconnect-btn">Change Sheet connection</button></span>
+    v0.32 · <a href="help.html">Help</a> · <a href="colors.html">Colors</a><span id="reconnect" hidden> · <button class="link" id="share">Share setup link</button> · <button class="link" id="reconnect-btn">Change Sheet connection</button></span>
   </footer>
 </main>
 
@@ -245,6 +246,7 @@
       <button type="button" class="toggle" data-verdict="Loved" aria-pressed="false">😍 Loved</button>
       <button type="button" class="toggle" data-verdict="Good" aria-pressed="false">🙂 Good</button>
       <button type="button" class="toggle" data-verdict="Meh" aria-pressed="false">😐 Meh</button>
+      <button type="button" class="toggle" data-verdict="Bad" aria-pressed="false">👎 Bad</button>
     </div>
     <label for="visit-deals">Happy hour or deals you saw</label>
     <input id="visit-deals" maxlength="500" placeholder="Optional" autocomplete="off">
@@ -702,11 +704,13 @@
     if (f.open) list = list.filter((x) => !x.closedOnArrival);
     if (f.max) list = list.filter((x) => x.trip && x.trip.fastest <= f.max);
 
-    // 5. Places closed when you'd arrive (shown greyed out) go to the very bottom.
+    // 5. Places closed when you'd arrive (shown greyed out) go to the very bottom,
+    //    and places marked Bad sit just above them.
     //    Above them: places with travel times first (shortest transit first), then the
     //    rest by distance; within each, nearby deals on (or starting soon) and inKind jump up.
     list.sort((a, b) =>
       a.closedOnArrival - b.closedOnArrival ||
+      (a.p.visit?.verdict === "Bad") - (b.p.visit?.verdict === "Bad") ||
       (a.trip ? 0 : 1) - (b.trip ? 0 : 1) ||
       (a.boost ? 0 : 1) - (b.boost ? 0 : 1) ||
       (a.trip && b.trip ? a.trip.min - b.trip.min : 0));
@@ -1070,7 +1074,8 @@
     if (p.visit && p.visit.notes) c.append(el("p", "meta", "📝 " + p.visit.notes));
 
     const chips = el("div", "chips");
-    if (p.visit) chips.append(el("span", "chip visited", `✓ Visited · ${p.visit.verdict}`));
+    if (p.visit) chips.append(el("span", p.visit.verdict === "Bad" ? "chip visited bad" : "chip visited",
+      p.visit.verdict === "Bad" ? "👎 Bad experience" : `✓ Visited · ${p.visit.verdict}`));
     if (p.added) chips.append(el("span", "chip", "📱 Added in app"));
     if (p.edited) chips.append(el("span", "chip", "✎ edited in app"));
     if (p.section === "recommend") chips.append(el("span", "chip star", "⭐ Been & loved"));
@@ -1278,7 +1283,7 @@
   $("visit-form").addEventListener("submit", (e) => {
     e.preventDefault();
     if (!chosenVerdict()) {
-      $("visit-error").textContent = "Pick Loved, Good, or Meh first.";
+      $("visit-error").textContent = "Pick Loved, Good, Meh, or Bad first.";
       $("visit-error").hidden = false;
       return;
     }

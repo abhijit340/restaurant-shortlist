@@ -200,6 +200,7 @@ const g = (name, lat, status = 'OPERATIONAL', periods = []) => ({
     ['tab: old layout has no visit', recOld.verdict === '' && visitOf_(recOld) === null],
     ['visit: saved with today\'s date, text trimmed and capped', visited.visited === '2026-10-02' && visited.dealsSeen === '$5 drafts till 6' && visited.visitNotes.length === 500],
     ['visit: editing keeps the first date', edited.visited === '2026-10-02' && edited.verdict === 'Meh' && edited.visitNotes === 'changed'],
+    ['visit: Bad is a verdict', applyVisit_(recOld, { verdict: 'Bad', notes: 'cold food' }, '2026-10-16').verdict === 'Bad'],
     ['visit: no verdict clears it', applyVisit_(visited, { verdict: '' }, 'x').verdict === '' && applyVisit_(visited, { verdict: 'Amazing' }, 'x').visited === ''],
     ['visit: other fields untouched', visited.status === 'ok' && visited.locs.length === 1 && visited.query === recOld.query],
     ['visit: what the app receives', JSON.stringify(visitOf_(edited)) === '{"date":"2026-10-02","verdict":"Meh","deals":"","notes":"changed"}'],

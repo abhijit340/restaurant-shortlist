@@ -839,7 +839,7 @@ function cleanLoc_(loc) {
 
 // ---------- Mark visited ----------
 
-const VERDICTS = ['Loved', 'Good', 'Meh'];
+const VERDICTS = ['Loved', 'Good', 'Meh', 'Bad'];
 
 function saveVisit_(body) {
   // A long lookup or refresh run rewrites the whole tab, so wait for it rather than race it.
